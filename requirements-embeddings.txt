@@ -1,0 +1,13 @@
+# Optional upgrade for the Semantic Relevance factor: meaning-based matching
+# via sentence-transformer embeddings instead of TF-IDF.
+#
+# Not installed by default — TalentIQ is fully functional (and faster to
+# install) on requirements.txt alone. Install this on top of it if you want
+# the embeddings engine available in ⚙️ Settings → Semantic Matching Engine:
+#
+#   pip install -r requirements.txt
+#   pip install -r requirements-embeddings.txt
+#
+# First use downloads the "all-MiniLM-L6-v2" model (~80MB) — needs internet
+# access once; cached locally after that.
+sentence-transformers>=2.2,<3

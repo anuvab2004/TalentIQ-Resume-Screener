@@ -1,0 +1,19 @@
+[theme]
+base = "light"
+primaryColor = "#0d9488"
+backgroundColor = "#f4f6fb"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#131b3d"
+font = "sans serif"
+# visible outlines on every input/select (inputs were white-on-white before)
+borderColor = "#b9c2d9"
+showWidgetBorder = true
+
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = true
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false
