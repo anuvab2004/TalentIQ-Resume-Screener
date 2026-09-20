@@ -13,7 +13,15 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src import styling, bias_checker, interview_questions, email_automation, settings_store, auth, auth_ui
-from src.matcher import score_candidate, rank_candidates, skill_category_breakdown, embeddings_available, WEIGHTS
+from src.matcher import (
+    score_candidate,
+    score_candidates_batch,
+    preload_embedding_model,
+    rank_candidates,
+    skill_category_breakdown,
+    embeddings_available,
+    WEIGHTS,
+)
 from src.parser import extract_social_link_labels, extract_social_links, parse_document, parse_job_description
 from src.sample_data import list_sample_resumes, load_sample_resume_bytes, list_sample_jds
 
@@ -23,6 +31,32 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+@st.cache_resource(show_spinner=False)
+def load_ai_model():
+    return preload_embedding_model()
+
+
+# ============================================================
+# TALENTIQ AI STARTUP
+# ============================================================
+
+if "_ai_startup_complete" not in st.session_state:
+    left, center, right = st.columns([1, 2, 1])
+
+    with center:
+        st.markdown("## 🧭")
+        st.title("TalentIQ")
+        st.caption("Enterprise Talent Intelligence")
+
+        with st.spinner("🧠 Initializing AI Engine..."):
+            load_ai_model()
+
+        st.success("AI Engine Ready ✓")
+
+    st.session_state["_ai_startup_complete"] = True
+    st.rerun()
+
 styling.inject(st)
 
 DEPARTMENTS = ["Engineering", "Data & AI", "Product", "Design", "Sales", "Finance", "Human Resources", "Operations"]
@@ -172,6 +206,20 @@ def time_of_day_greeting(now=None):
 # Sidebar
 # --------------------------------------------------------------------------
 def sidebar_nav():
+    if "navigate_to" in st.session_state:
+        target = st.session_state.pop("navigate_to")
+        if target in [
+            "🏠 Dashboard",
+            "📁 Resume Upload",
+            "🧠 Candidate Intelligence",
+            "➕ Create Job Requisition",
+            "⚙️ Settings",
+        ]:
+            st.session_state["current_page"] = target
+
+    st.session_state.setdefault("current_page", "🏠 Dashboard")
+
+    
     with st.sidebar:
         st.markdown(
             """
@@ -203,6 +251,7 @@ def sidebar_nav():
                 "➕ Create Job Requisition",
                 "⚙️ Settings",
             ],
+            key="current_page",
             label_visibility="collapsed",
         )
         st.markdown("---")
@@ -492,7 +541,7 @@ def page_upload():
     if rid not in st.session_state["requisitions"]:
         return  # requisition was just deleted
 
-    st.markdown('<div class="tiq-card">', unsafe_allow_html=True)
+    #st.markdown('<div class="tiq-card">', unsafe_allow_html=True)
     st.markdown("##### 📤 Drop resumes here")
     st.caption("Upload PDF, DOCX, or TXT resumes in bulk — supports multiple files at once.")
 
@@ -528,7 +577,7 @@ def page_upload():
         st.dataframe(preview_df, width='stretch', hide_index=True, height=min(38 * (len(preview_df) + 1), 300))
 
     run = st.button("⚡ Run AI Screening", type="primary", disabled=(len(file_records) == 0))
-    st.markdown("</div>", unsafe_allow_html=True)
+    #st.markdown("</div>", unsafe_allow_html=True)
 
     if run and file_records:
         jd_parsed = {
@@ -540,15 +589,50 @@ def page_upload():
         req_weights = req.get("weights", st.session_state["default_weights"])
         progress = st.progress(0.0, text="Parsing resumes…")
         new_results = []
-        for i, (fname, fbytes, _) in enumerate(file_records):
-            doc = parse_document(fname, fbytes, extra_skills=st.session_state["custom_skills"])
-            res = score_candidate(
-                doc, jd_parsed, filename=fname,
-                semantic_backend=st.session_state["semantic_backend"], weights=req_weights,
-            )
-            new_results.append(res)
-            progress.progress((i + 1) / len(file_records), text=f"Scoring {fname}…")
+        # ---------------------------------------------------------
+        # Phase 1: Parse all resumes
+        # ---------------------------------------------------------
+        parsed_resumes = []
+        filenames = []
 
+        for i, (fname, fbytes, _) in enumerate(file_records):
+
+            doc = parse_document(
+                fname,
+                fbytes,
+                extra_skills=st.session_state["custom_skills"],
+            )
+
+            parsed_resumes.append(doc)
+            filenames.append(fname)
+
+            if (i + 1) % 5 == 0 or i + 1 == len(file_records):
+                progress.progress(
+                    (i + 1) / len(file_records),
+                    text=f"Parsed {i + 1}/{len(file_records)} resumes…",
+                )
+
+
+        # ---------------------------------------------------------
+        # Phase 2: Batch AI scoring
+        # ---------------------------------------------------------
+        progress.progress(
+            0.0,
+            text="AI matching resumes in batches…",
+        )
+
+        new_results = score_candidates_batch(
+            parsed_resumes,
+            jd_parsed,
+            filenames=filenames,
+            semantic_backend=st.session_state["semantic_backend"],
+            weights=req_weights,
+        )
+
+        progress.progress(
+            1.0,
+            text=f"Scored {len(new_results)} resumes.",
+        )
         if existing_results and upload_mode == "Append to existing pool":
             # Non-destructive merge: keyed by a stable candidate_id (filename +
             # name + email + phone) so re-uploading the same resume refreshes
@@ -565,9 +649,24 @@ def page_upload():
         st.session_state["results"][rid] = combined
         st.session_state["last_run_at"] = dt.datetime.now()
         progress.empty()
-        st.success(f"Screening complete — {len(combined)} candidates now in the pool for this requisition "
-                   f"({len(new_results)} just processed). Open **Candidate Intelligence** to review the ranked shortlist.")
+
+        
+
+        st.success(
+            f"Screening complete — {len(combined)} candidates now in the pool for this requisition "
+            f"({len(new_results)} just processed)."
+        )
+
         st.balloons()
+        import time
+        time.sleep(0.8)
+        
+        # Ask the next rerun to open Candidate Intelligence.
+        # We use a separate flag because current_page belongs to the
+        # Streamlit radio widget and should not be changed after it is created.
+        st.session_state["navigate_to"] = "🧠 Candidate Intelligence"
+
+        st.rerun()
 
 
 # --------------------------------------------------------------------------

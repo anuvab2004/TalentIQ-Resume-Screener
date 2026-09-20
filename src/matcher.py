@@ -97,10 +97,23 @@ def embeddings_available() -> bool:
 
 def _get_embedding_model():
     global _EMBEDDING_MODEL
+
     if _EMBEDDING_MODEL is None:
         from sentence_transformers import SentenceTransformer
-        _EMBEDDING_MODEL = SentenceTransformer(EMBEDDING_MODEL_NAME)
+
+        _EMBEDDING_MODEL = SentenceTransformer(
+            EMBEDDING_MODEL_NAME
+        )
+
     return _EMBEDDING_MODEL
+
+
+def preload_embedding_model():
+    """
+    Load the embedding model once when the application starts.
+    Later screening calls reuse the same model from memory.
+    """
+    return _get_embedding_model()
 
 
 def _chunk_text(text: str, max_words: int = 200) -> list:
@@ -115,8 +128,56 @@ def _chunk_text(text: str, max_words: int = 200) -> list:
 
 def _embed_mean(text: str, model):
     import numpy as np
-    vecs = model.encode(_chunk_text(text), show_progress_bar=False, normalize_embeddings=True)
+
+    chunks = _chunk_text(text)
+
+    vecs = model.encode(
+        chunks,
+        show_progress_bar=False,
+        normalize_embeddings=True,
+        batch_size=32,
+    )
+
     return np.mean(vecs, axis=0)
+
+def _embed_documents_batch(texts: list, model, batch_size: int = 32):
+    """Encode multiple documents efficiently.
+
+    Long documents are split into chunks. All chunks are encoded in batches,
+    then the chunk embeddings belonging to each document are mean-pooled back
+    into one vector per document.
+    """
+    import numpy as np
+
+    if not texts:
+        return np.empty((0, 384), dtype="float32")
+
+    all_chunks = []
+    chunk_counts = []
+
+    for text in texts:
+        chunks = _chunk_text(text)
+        all_chunks.extend(chunks)
+        chunk_counts.append(len(chunks))
+
+    all_vectors = model.encode(
+        all_chunks,
+        show_progress_bar=False,
+        normalize_embeddings=True,
+        batch_size=batch_size,
+    )
+
+    document_vectors = []
+    start = 0
+
+    for count in chunk_counts:
+        end = start + count
+        document_vectors.append(
+            np.mean(all_vectors[start:end], axis=0)
+        )
+        start = end
+
+    return np.asarray(document_vectors)
 
 
 def _semantic_relevance_tfidf(resume_text: str, jd_text: str) -> float:
@@ -277,6 +338,192 @@ def score_candidate(parsed_resume, parsed_jd, filename="", semantic_backend="aut
         candidate_id=make_candidate_id(filename, parsed_resume.name, parsed_resume.email, parsed_resume.phone),
         raw_text=parsed_resume.raw_text,
     )
+
+def score_candidates_batch(
+    parsed_resumes,
+    parsed_jd,
+    filenames=None,
+    semantic_backend="auto",
+    weights=None,
+):
+    """Score many parsed resumes against one JD efficiently.
+
+    The JD embedding is calculated only once and all resume embeddings are
+    generated in batches. This is much faster than calling score_candidate()
+    separately for every resume.
+    """
+    import numpy as np
+
+    weights = weights or WEIGHTS
+    filenames = filenames or [""] * len(parsed_resumes)
+
+    # ---------------------------------------------------------
+    # Decide which semantic engine to use
+    # ---------------------------------------------------------
+    use_embeddings = (
+        semantic_backend in ("auto", "embeddings")
+        and embeddings_available()
+    )
+
+    model = None
+    jd_vector = None
+    resume_vectors = None
+
+    if use_embeddings:
+        try:
+            model = _get_embedding_model()
+
+            # Encode JD ONLY ONCE.
+            jd_vector = _embed_mean(
+                parsed_jd["raw_text"],
+                model
+            )
+
+            # Encode ALL resumes in batches.
+            resume_vectors = _embed_documents_batch(
+                [resume.raw_text for resume in parsed_resumes],
+                model,
+                batch_size=32,
+            )
+
+        except Exception:
+            use_embeddings = False
+
+    results = []
+
+    for index, parsed_resume in enumerate(parsed_resumes):
+
+        # -----------------------------------------------------
+        # Semantic similarity
+        # -----------------------------------------------------
+        if use_embeddings:
+            resume_vector = resume_vectors[index]
+
+            denominator = (
+                np.linalg.norm(resume_vector)
+                * np.linalg.norm(jd_vector)
+                + 1e-9
+            )
+
+            similarity = float(
+                np.dot(resume_vector, jd_vector) / denominator
+            )
+
+            semantic = round(
+                max(similarity, 0.0) * 100,
+                1
+            )
+
+            engine_used = "embeddings"
+
+        else:
+            semantic, engine_used = semantic_relevance(
+                parsed_resume.raw_text,
+                parsed_jd["raw_text"],
+                backend="tfidf",
+            )
+
+        # -----------------------------------------------------
+        # Skill matching
+        # -----------------------------------------------------
+        skill_score, matched, missing, extra = _skill_alignment(
+            parsed_resume.skills,
+            parsed_jd["required_skills"],
+        )
+
+        # -----------------------------------------------------
+        # Experience
+        # -----------------------------------------------------
+        exp_score = _experience_evidence(
+            parsed_resume.years_experience,
+            parsed_jd["min_years"],
+        )
+
+        # -----------------------------------------------------
+        # Education
+        # -----------------------------------------------------
+        edu_score = _education_evidence(
+            parsed_resume.education,
+            parsed_jd["required_education"],
+        )
+
+        factors = {
+            "semantic_relevance": semantic,
+            "skill_alignment": skill_score,
+            "experience_evidence": exp_score,
+            "education_evidence": edu_score,
+        }
+
+        # -----------------------------------------------------
+        # Overall score
+        # -----------------------------------------------------
+        overall = round(
+            sum(
+                factors[k] * weights[k]
+                for k in WEIGHTS
+            ),
+            1,
+        )
+
+        status = _status_from_score(overall)
+
+        rationale = _build_rationale(
+            parsed_resume.name,
+            matched,
+            missing,
+            factors,
+            status,
+        )
+
+        # -----------------------------------------------------
+        # Fairness audit
+        # -----------------------------------------------------
+        fairness_semantic = _semantic_relevance_tfidf(
+            parsed_resume.raw_text,
+            parsed_jd["raw_text"],
+        )
+
+        fairness_audit = bias_checker.audit_fairness(
+            parsed_resume.raw_text,
+            parsed_jd["raw_text"],
+            parsed_resume.name,
+            parsed_resume.email,
+            parsed_resume.phone,
+            fairness_semantic,
+        )
+
+        results.append(
+            MatchResult(
+                candidate_name=parsed_resume.name,
+                overall_score=overall,
+                factors=factors,
+                matched_skills=matched,
+                missing_skills=missing,
+                extra_skills=extra,
+                status=status,
+                rationale=rationale,
+                filename=filenames[index],
+                email=parsed_resume.email,
+                phone=parsed_resume.phone,
+                linkedin_url=parsed_resume.linkedin_url,
+                github_url=parsed_resume.github_url,
+                portfolio_url=parsed_resume.portfolio_url,
+                education=parsed_resume.education,
+                years_experience=parsed_resume.years_experience,
+                fairness_audit=fairness_audit,
+                semantic_engine=engine_used,
+                candidate_id=make_candidate_id(
+                    filenames[index],
+                    parsed_resume.name,
+                    parsed_resume.email,
+                    parsed_resume.phone,
+                ),
+                raw_text=parsed_resume.raw_text,
+            )
+        )
+
+    return results
+
 
 
 """def _rescale(value, old_min, old_max, new_min=22.0, new_max=98.0):
