@@ -126,18 +126,80 @@ def extract_text(filename: str, file_bytes: bytes) -> str:
 
 
 def guess_name(text: str, fallback: str) -> str:
-    for line in text.splitlines()[:8]:
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    # Look through the first 20 meaningful lines.
+    for i, line in enumerate(lines[:20]):
         clean = line.strip()
+
         if not clean or len(clean) > 45:
             continue
+
         low = clean.lower()
-        if any(k in low for k in STOPWORD_NAME_LINES):
+
+        # Ignore obvious section headings.
+        if any(k == low for k in STOPWORD_NAME_LINES):
             continue
+
+        # Ignore contact information.
         if EMAIL_RE.search(clean) or PHONE_RE.search(clean):
             continue
+
         words = clean.split()
-        if 1 < len(words) <= 4 and all(w.replace(".", "").isalpha() or w.isupper() for w in words):
+
+        # Reject obvious job titles / roles.
+        title_words = {
+            "engineer",
+            "developer",
+            "scientist",
+            "analyst",
+            "designer",
+            "manager",
+            "intern",
+            "student",
+            "consultant",
+            "architect",
+            "administrator",
+            "specialist",
+            "lead",
+            "trainee",
+        }
+
+        if any(
+            word.lower().strip(".,-") in title_words
+            for word in words
+        ):
+            continue
+
+        # Normal case: name is on one line.
+        if (
+            1 < len(words) <= 4
+            and all(
+                w.replace(".", "").isalpha() or w.isupper()
+                for w in words
+            )
+        ):
             return clean.title() if clean.isupper() else clean
+
+        # PDF-layout case:
+        # name may be split across two consecutive lines,
+        # e.g. "AHELI" followed by "BANERJEE".
+        if len(words) == 1 and clean.isalpha():
+            if i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+
+                if (
+                    next_line.isalpha()
+                    and len(next_line) <= 30
+                    and next_line.lower() not in STOPWORD_NAME_LINES
+                    and next_line.lower() not in title_words
+                ):
+                    return f"{clean.title()} {next_line.title()}"
+
     return fallback
 
 

@@ -279,39 +279,46 @@ def score_candidate(parsed_resume, parsed_jd, filename="", semantic_backend="aut
     )
 
 
-def _rescale(value, old_min, old_max, new_min=22.0, new_max=98.0):
+"""def _rescale(value, old_min, old_max, new_min=22.0, new_max=98.0):
     if old_max - old_min < 1e-9:
         return new_max if value > 0 else new_min
     ratio = (value - old_min) / (old_max - old_min)
     return round(new_min + ratio * (new_max - new_min), 1)
+"""
 
 
 def rank_candidates(results: list, weights=None) -> list:
-    """Batch-level pass: TF-IDF cosine similarity is a relative signal, so it
-    is rescaled across *this* candidate pool (the way a recruiter reads it —
-    'who is strongest for THIS role among THESE applicants') rather than shown
-    as a raw, hard-to-interpret cosine value. Overall scores are recomputed
-    from the rescaled semantic factor, then the pool is sorted best-first.
+    """Recompute final scores and sort candidates best-first.
 
-    The rescale only kicks in with 2+ candidates who actually differ — with a
-    single candidate (or a pool that's tied), stretching to a fixed 22-98
-    range would inflate one resume's semantic score regardless of real fit,
-    so the raw score is kept as-is instead."""
+    Semantic relevance is kept on its original 0-100 scale so that a
+    candidate's score does not change just because other candidates
+    are added to or removed from the screening pool.
+    """
     if not results:
         return results
+
     weights = weights or WEIGHTS
-    raw_semantic = [r.factors["semantic_relevance"] for r in results]
-    lo, hi = min(raw_semantic), max(raw_semantic)
-    can_rescale = len(results) > 1 and (hi - lo) > 1e-9
+
     for r in results:
-        if can_rescale:
-            r.factors["semantic_relevance"] = _rescale(r.factors["semantic_relevance"], lo, hi)
-        r.overall_score = round(sum(r.factors[k] * weights[k] for k in WEIGHTS), 1)
-        r.status = _status_from_score(r.overall_score)
-        r.rationale = _build_rationale(
-            r.candidate_name, r.matched_skills, r.missing_skills, r.factors, r.status
+        # Keep the original semantic relevance score.
+        # Do NOT rescale it based on the other candidates.
+        r.overall_score = round(
+            sum(r.factors[k] * weights[k] for k in WEIGHTS),
+            1
         )
+
+        r.status = _status_from_score(r.overall_score)
+
+        r.rationale = _build_rationale(
+            r.candidate_name,
+            r.matched_skills,
+            r.missing_skills,
+            r.factors,
+            r.status
+        )
+
     results.sort(key=lambda r: -r.overall_score)
+
     return results
 
 
