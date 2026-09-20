@@ -12,7 +12,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from src import styling, bias_checker, interview_questions, email_automation, settings_store, auth, auth_ui
+from src import styling, bias_checker, interview_questions, email_automation, settings_store, auth, auth_ui, db
 from src.matcher import score_candidate, rank_candidates, skill_category_breakdown, embeddings_available, WEIGHTS
 from src.parser import extract_social_link_labels, extract_social_links, parse_document, parse_job_description
 from src.sample_data import list_sample_resumes, load_sample_resume_bytes, list_sample_jds
@@ -42,15 +42,41 @@ def current_user_id():
 
 
 def sign_out():
-    """Wipe the whole session (requisitions, resumes, scores, mailbox settings)
-    so the next person to sign in on this browser starts clean."""
+    """Sign out of Supabase and clear the session state."""
+    auth.sign_out()
     st.session_state.clear()
     st.rerun()
 
 
 # --------------------------------------------------------------------------
-# Session state
+# Session state & Supabase Data Sync
 # --------------------------------------------------------------------------
+def sync_from_database():
+    """Attempt to hydrate in-memory state from Supabase if configured."""
+    if not db.is_configured():
+        return False
+    try:
+        reqs = db.fetch_requisitions()
+        if reqs:
+            st.session_state["requisitions"] = reqs
+            if not st.session_state.get("active_req_id") or st.session_state["active_req_id"] not in reqs:
+                st.session_state["active_req_id"] = list(reqs.keys())[0]
+            num_ids = [
+                int(k.split("_")[-1]) for k in reqs.keys()
+                if k.startswith("req_") and k.split("_")[-1].isdigit()
+            ]
+            st.session_state["req_counter"] = max(num_ids) if num_ids else len(reqs)
+            for rid in reqs:
+                st.session_state["results"][rid] = db.fetch_results(rid)
+            st.session_state["candidate_actions"] = db.fetch_all_candidate_actions()
+            st.session_state["interview_guides"] = db.fetch_all_interview_guides()
+            st.session_state["email_log"] = db.fetch_all_email_logs()
+            return True
+    except Exception as e:
+        print(f"[Supabase sync error] {e}")
+    return False
+
+
 def init_state():
     ss = st.session_state
     ss.setdefault("requisitions", {})
@@ -79,10 +105,12 @@ def init_state():
     ss.setdefault("email_log", {})         # (req_id, candidate_id) -> list[str] status messages
     ss.setdefault("confirm_delete_req", None)
 
-    # Seed the demo requisition ONCE per session (and only if the workspace
-    # default allows it). Previously this ran on every rerun whenever the list
-    # was empty, so a deleted requisition instantly reappeared and the Active
-    # Jobs count could never reach zero.
+    # Sync data from Supabase once on session init
+    if not ss.get("_synced_from_db"):
+        ss["_synced_from_db"] = True
+        sync_from_database()
+
+    # Seed the demo requisition ONCE per session (and only if still empty and allowed)
     if not ss.get("_demo_seed_checked"):
         ss["_demo_seed_checked"] = True
         if not ss["requisitions"] and ss["app_prefs"].get("seed_demo_requisition", True):
@@ -96,7 +124,7 @@ def seed_default_requisition():
     jd_text = jds.get("Machine Learning", "")
     parsed = parse_job_description(jd_text, extra_skills=st.session_state.get("custom_skills"))
     req_id = "req_1"
-    st.session_state["requisitions"][req_id] = {
+    req_data = {
         "id": req_id,
         "title": "Machine Learning Engineer",
         "department": "Data & AI",
@@ -107,6 +135,8 @@ def seed_default_requisition():
         "weights": dict(st.session_state.get("default_weights", WEIGHTS)),
         "created_at": dt.datetime.now(),
     }
+    st.session_state["requisitions"][req_id] = req_data
+    db.save_requisition(req_data)
     st.session_state["active_req_id"] = req_id
     st.session_state["req_counter"] = 1
 
@@ -136,6 +166,7 @@ def delete_requisition(rid):
     for key in ("upload_req_selector", "cand_req_selector", "dash_remove_req", "dash_remove_confirm"):
         ss.pop(key, None)
     ss["confirm_delete_req"] = None
+    db.delete_requisition(rid)
 
 
 def _local_now():
@@ -547,6 +578,7 @@ def page_upload():
                 semantic_backend=st.session_state["semantic_backend"], weights=req_weights,
             )
             new_results.append(res)
+            db.upload_resume_file(fname, fbytes, req_id=rid)
             progress.progress((i + 1) / len(file_records), text=f"Scoring {fname}…")
 
         if existing_results and upload_mode == "Append to existing pool":
@@ -564,6 +596,7 @@ def page_upload():
         combined = rank_candidates(combined, weights=req_weights)
         st.session_state["results"][rid] = combined
         st.session_state["last_run_at"] = dt.datetime.now()
+        db.save_results(rid, combined, st.session_state.get("candidate_actions"))
         progress.empty()
         st.success(f"Screening complete — {len(combined)} candidates now in the pool for this requisition "
                    f"({len(new_results)} just processed). Open **Candidate Intelligence** to review the ranked shortlist.")
@@ -625,12 +658,15 @@ def candidate_profile_dialog(rid, result):
     a1, a2, a3, a4 = st.columns(4)
     if a1.button("⭐ Shortlist", key=f"short_{key_prefix}", type="primary" if current_action != "Shortlisted" else "secondary"):
         st.session_state["candidate_actions"][(rid, result.candidate_id)] = "Shortlisted"
+        db.update_candidate_action(rid, result.candidate_name, "Shortlisted")
         st.rerun()
     if a2.button("🔎 Move to Review", key=f"rev_{key_prefix}"):
         st.session_state["candidate_actions"][(rid, result.candidate_id)] = "Review"
+        db.update_candidate_action(rid, result.candidate_name, "Review")
         st.rerun()
     if a3.button("✖ Reject", key=f"rej_{key_prefix}"):
         st.session_state["candidate_actions"][(rid, result.candidate_id)] = "Rejected"
+        db.update_candidate_action(rid, result.candidate_name, "Rejected")
         st.rerun()
     profile_txt = build_profile_text(result)
     a4.download_button("⬇ Download", data=profile_txt, file_name=f"{result.candidate_name.replace(' ', '_')}_profile.txt",
@@ -705,7 +741,9 @@ def candidate_profile_dialog(rid, result):
     st.markdown("##### 🎯 Suggested Interview Questions")
     guide_key = (rid, result.candidate_id)
     if st.button("Generate Interview Questions", key=f"gen_q_{key_prefix}"):
-        st.session_state["interview_guides"][guide_key] = interview_questions.generate_interview_questions(result, req_title)
+        questions = interview_questions.generate_interview_questions(result, req_title)
+        st.session_state["interview_guides"][guide_key] = questions
+        db.save_interview_guide(rid, result.candidate_name, questions)
     guide = st.session_state["interview_guides"].get(guide_key)
     if guide:
         for i, q in enumerate(guide):
@@ -717,8 +755,12 @@ def candidate_profile_dialog(rid, result):
             q["question"] = question
             if st.button("🗑 Delete question", key=f"del_guide_q_{key_prefix}_{i}"):
                 guide.pop(i)
+                db.save_interview_guide(rid, result.candidate_name, guide)
+                st.rerun()
         if st.button("➕ Add question", key=f"add_guide_q_{key_prefix}"):
             guide.append({"category": "Custom", "question": ""})
+            db.save_interview_guide(rid, result.candidate_name, guide)
+            st.rerun()
         guide_txt = interview_questions.format_questions_text(result.candidate_name, req_title, guide)
         st.download_button("⬇ Download interview guide", data=guide_txt,
                             file_name=f"{result.candidate_name.replace(' ', '_')}_interview_guide.txt",
@@ -752,6 +794,7 @@ def candidate_profile_dialog(rid, result):
                   disabled=(to_email == "Not detected")):
         success, message = email_automation.send_email_smtp(st.session_state["smtp_config"], to_email, subject, body)
         st.session_state["email_log"].setdefault(guide_key, []).append(message)
+        db.save_email_log(rid, result.candidate_name, message)
         if success:
             st.success(message)
         else:
@@ -1062,7 +1105,7 @@ def page_requisition():
                 jd_text, min_years_override=min_years, extra_skills=st.session_state["custom_skills"]
             )
             rid = new_req_id()
-            st.session_state["requisitions"][rid] = {
+            req_data = {
                 "id": rid,
                 "title": title,
                 "department": department,
@@ -1073,6 +1116,8 @@ def page_requisition():
                 "weights": dict(st.session_state["default_weights"]),
                 "created_at": dt.datetime.now(),
             }
+            st.session_state["requisitions"][rid] = req_data
+            db.save_requisition(req_data)
             st.session_state["active_req_id"] = rid
             st.success(f"Requisition **{title}** created with {len(parsed['required_skills'])} auto-detected required skills. "
                        f"Head to **Resume Upload** to start screening.")
@@ -1339,9 +1384,11 @@ def page_settings():
 
     account_settings_card()
 
-    st.markdown('<div class="tiq-card"><h4>Session Data</h4>', unsafe_allow_html=True)
-    st.caption("All requisitions, uploaded resumes, and scores in this app live only in your current session — nothing is sent anywhere else. "
-               "Your saved organization details above are not affected by a reset.")
+    st.markdown('<div class="tiq-card"><h4>Cloud Data & Persistence</h4>', unsafe_allow_html=True)
+    if db.is_configured():
+        st.caption("All requisitions, screened candidates, interview guides, and email logs are synchronized with your Supabase database.")
+    else:
+        st.caption("Supabase is not configured — running in session-only mode.")
     prefs = st.session_state["app_prefs"]
     seed_demo = st.checkbox(
         "Start each new session with the demo requisition (Machine Learning Engineer)",
@@ -1352,14 +1399,14 @@ def page_settings():
         prefs["seed_demo_requisition"] = seed_demo
         settings_store.save_app_prefs(prefs, current_user_id())
         st.toast("Preference saved — applies from the next new session.")
-    if st.button("🗑 Reset all session data"):
-        # --- FIX: also clear the new prefill/version keys ---
+    if st.button("🗑 Reset all data (Clear Supabase & Session)"):
+        db.reset_all_data()
         for key in ["requisitions", "results", "candidate_actions", "active_req_id", "req_counter",
                     "last_run_at", "jd_draft_text", "interview_guides", "email_log",
                     "upload_req_selector", "cand_req_selector",
                     "prefill_choice", "last_prefill_applied", "jd_widget_version",
                     "default_weights", "custom_skills", "confirm_delete_req",
-                    "dash_remove_req", "dash_remove_confirm", "_demo_seed_checked"]:
+                    "dash_remove_req", "dash_remove_confirm", "_demo_seed_checked", "_synced_from_db"]:
             st.session_state.pop(key, None)
         st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)

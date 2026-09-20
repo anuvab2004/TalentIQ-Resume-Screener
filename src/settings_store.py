@@ -43,6 +43,7 @@ Environment overrides:
 """
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -99,7 +100,8 @@ def settings_path() -> Path:
 def smtp_path(user_id=None) -> Path:
     if user_id is None:
         return _secret_dir() / "smtp.json"
-    return _secret_dir() / f"smtp_{int(user_id)}.json"
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "_", str(user_id))
+    return _secret_dir() / f"smtp_{safe_id}.json"
 
 
 # --------------------------------------------------------------------------

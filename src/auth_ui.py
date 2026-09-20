@@ -130,11 +130,13 @@ def _sign_up_form():
     if submitted:
         ok, message, user = auth.sign_up(name, email, password, confirm)
         if ok:
-            # Pre-fill the email sign-off with the name they just registered with.
-            org = settings_store.load_org_settings(user["id"])
-            org["hr_sender_name"] = user["name"]
-            settings_store.save_org_settings(org, user["id"])
-            _start_session(user)
+            if user and user.get("id"):
+                org = settings_store.load_org_settings(user["id"])
+                org["hr_sender_name"] = user["name"]
+                settings_store.save_org_settings(org, user["id"])
+                _start_session(user)
+            else:
+                st.success(message)
         else:
             st.error(message)
 
@@ -144,10 +146,12 @@ def render_auth_page():
     _brand_header()
     _, middle, _ = st.columns([1, 1.6, 1])
     with middle:
+        from . import db
+        if not db.is_configured():
+            st.warning("⚠️ **Supabase not configured**: Please set `SUPABASE_URL` and `SUPABASE_KEY` in your `.env` file or environment variables.")
         tab_in, tab_up = st.tabs(["Sign in", "Create account"])
         with tab_in:
             _sign_in_form()
         with tab_up:
             _sign_up_form()
-        st.caption("🔒 Passwords are stored as salted hashes, never in plain text. "
-                   "Each account has its own email settings.")
+        st.caption("🔒 Authentication is secured directly by Supabase Auth.")

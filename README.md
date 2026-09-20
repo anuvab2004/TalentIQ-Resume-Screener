@@ -207,8 +207,9 @@ talentiq/
 │   ├── bias_checker.py          # JD language scanner + blind-scoring fairness audit
 │   ├── interview_questions.py   # Rule-based interview question generator
 │   ├── email_automation.py      # Email templates + SMTP send + .eml export
-│   ├── auth.py                  # Accounts: sign-up / sign-in (scrypt hashes, lockout), SQLite
-│   ├── auth_ui.py               # Sign-in / sign-up screen
+│   ├── auth.py                  # Accounts: Supabase Auth integration (sign-up, sign-in, session)
+│   ├── auth_ui.py               # Sign-in / sign-up screen with Supabase Auth
+│   ├── db.py                    # Supabase database persistence (requisitions, candidates, guides, logs)
 │   ├── settings_store.py        # Saved org identity, workspace defaults, SMTP credentials (per account)
 │   ├── skills_taxonomy.py       # Curated skill list + synonym/abbreviation map
 │   ├── sample_data.py           # Loads the bundled demo dataset
@@ -248,10 +249,43 @@ candidates are pre-loaded.
 4. Deploy — `requirements.txt` and `.streamlit/config.toml` are picked up
    automatically.
 
-### Any other host (Render, Railway, an internal VM, Docker, etc.)
-The app has no external API keys and no database server — it is entirely
-self-contained (accounts in a local SQLite file, see §2.5) and holds workspace state in `st.session_state`, so any standard Streamlit deployment
-process works:
+### Docker & Docker Compose (Recommended for Containerized Environments)
+
+Run TalentIQ with a single command using Docker Compose:
+
+```bash
+# 1. Start the container with Docker Compose
+docker compose up -d --build
+
+# 2. View running logs
+docker compose logs -f
+
+# 3. Stop the container
+docker compose down
+```
+
+Open your browser at **http://localhost:8501**. User accounts and organization settings will automatically persist in the `talentiq-data` Docker volume.
+
+#### Using standalone Docker CLI:
+
+```bash
+# Build the Docker image
+docker build -t talentiq:latest .
+
+# Run container with volume persistence for user data
+docker run -d -p 8501:8501 -v talentiq-data:/app/data --name talentiq-app talentiq:latest
+```
+
+#### Optional: Building with Sentence-Transformers Embeddings
+
+To bundle the local embeddings model into the container image:
+
+```bash
+docker build --build-arg INSTALL_EMBEDDINGS=true -t talentiq:embeddings .
+```
+
+### Any other host (Render, Railway, an internal VM, etc.)
+The app uses Supabase for authentication and database persistence (requisitions, candidates, guides, and logs):
 
 ```bash
 pip install -r requirements.txt
