@@ -16,7 +16,7 @@ Semantic Relevance has two backends:
   - "embeddings" — sentence-transformer sentence embeddings (cosine
                     similarity in meaning-space, not just wording). Optional:
                     only used if the `sentence-transformers` package is
-                    installed (see requirements-embeddings.txt) — otherwise
+                    installed (see requirements.txt) — otherwise
                     every call transparently falls back to TF-IDF.
 """
 import hashlib

@@ -3,8 +3,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        INSTALL_EMBEDDINGS: "true"
     container_name: talentiq-app
     ports:
       - "${TALENTIQ_PORT:-8501}:8501"

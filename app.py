@@ -1192,7 +1192,6 @@ def candidate_comparison_panel(rid, results):
 def page_requisition():
     styling.topbar(st, "Create Job Requisition")
 
-    st.markdown('<div class="tiq-card">', unsafe_allow_html=True)
     sample_jds = list_sample_jds()
 
     prefill_choice = st.selectbox(
@@ -1256,8 +1255,6 @@ def page_requisition():
         required_education = c2.selectbox("Minimum education required", EDU_OPTIONS)
 
         submitted = st.form_submit_button("Create Requisition", type="primary")
-
-    st.markdown("</div>", unsafe_allow_html=True)
 
     if submitted:
         if not title or not jd_text.strip():
@@ -1367,7 +1364,7 @@ def page_settings():
     st.caption(
         "✅ sentence-transformers is installed — embeddings are available."
         if have_embeddings else
-        "⚠️ sentence-transformers isn't installed — install requirements-embeddings.txt to enable it. "
+        "⚠️ sentence-transformers isn't installed — install requirements.txt to enable it. "
         "TF-IDF will be used regardless of the setting below until then."
     )
     engine_labels = {
