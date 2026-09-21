@@ -22,7 +22,7 @@ from src.matcher import (
     embeddings_available,
     WEIGHTS,
 )
-from src.parser import extract_social_link_labels, extract_social_links, format_experience, format_years, parse_document, parse_job_description
+from src.parser import extract_social_link_labels, extract_social_links, extract_work_periods, format_experience, format_years, parse_document, parse_job_description
 try:
     from src.parser import clean_doubled_text
 except (ImportError, AttributeError):
@@ -933,6 +933,15 @@ def candidate_profile_dialog(rid, result):
 
     st.caption(f"Education: {result.education}  ·  Experience: {format_experience(result.years_experience, getattr(result, 'experience_months', None))}")
 
+    raw_resume_text = getattr(result, "raw_text", "") or _resolve_candidate_raw_text(result, rid)
+    detected_periods = extract_work_periods(raw_resume_text)
+    if detected_periods:
+        st.markdown("##### 💼 Experience & Internships")
+        for p in detected_periods:
+            m_cnt = p.get("months", 0)
+            m_str = f" · **{m_cnt} mo{'s' if m_cnt != 1 else ''}**" if m_cnt > 0 else ""
+            st.markdown(f"- **{p['period']}**{m_str} — {p.get('context', '')}")
+
     st.markdown("##### Why This Match")
     st.write(result.rationale)
 
@@ -1091,6 +1100,17 @@ def build_profile_text(result):
                     lines.append(f"  - {label}: {float(v):.0f}%")
                 except (ValueError, TypeError):
                     pass
+
+    raw_resume_text = getattr(result, "raw_text", "")
+    detected_periods = extract_work_periods(raw_resume_text)
+    if detected_periods:
+        lines.append("")
+        lines.append("Experience & Internships:")
+        for p in detected_periods:
+            m_cnt = p.get("months", 0)
+            m_str = f" ({m_cnt} months)" if m_cnt > 0 else ""
+            lines.append(f"  - {p['period']}{m_str}: {p.get('context', '')}")
+
     lines += [
         "",
         f"Why This Match: {result.rationale}",

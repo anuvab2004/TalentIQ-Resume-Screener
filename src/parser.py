@@ -532,7 +532,13 @@ def _interval(sy, sm, ey, em, is_present, now):
         end = ey * 12                      # "2019 - 2023": whole years between
         if ey == sy:
             end = start + 12               # a lone-year range like "2021 - 2021"
-    end = min(end, now_idx + 1)
+    if is_present:
+        end = min(end, now_idx + 1)
+    elif start <= now_idx:
+        end = min(end, now_idx + 1)
+    elif ey is not None and ey > now.year + 10:
+        return None
+
     if end <= start or end - start > 12 * 50:
         return None
     return start, end
@@ -626,7 +632,7 @@ def _work_periods(text: str, now):
 
         iv = _interval(*parts, now)
         if iv:
-            snippet = re.sub(r"\s+", " ", f"{before[-40:]}{m.group(0)}{after[:30]}").strip()
+            snippet = re.sub(r"\s+", " ", f"{before[-90:]}{m.group(0)}{after[:45]}").strip()
             periods.append((iv, m.group(0).strip(), snippet))
     return periods
 
@@ -644,25 +650,40 @@ def _merged_months(intervals) -> int:
 USE_STATED_YEARS_FALLBACK = True
 
 
-def extract_work_periods(text: str, now=None):
+def extract_work_periods(text: str, now=None, include_undated: bool = True):
     """The jobs and internships that count towards experience, for verification:
     [{'period': 'Jan 2020 - Present', 'months': 81, 'context': '...'}]"""
     now = now or _dt.date.today()
     periods = _work_periods(text, now)
+    results = []
     if periods:
-        return [
+        results = [
             {"period": period, "months": iv[1] - iv[0], "context": ctx}
             for iv, period, ctx in periods
         ]
 
     # Stated internship duration fallback (e.g. '3 months internship')
-    m = MONTHS_EXP_RE.search(text) or INTERNSHIP_DURATION_RE.search(text)
-    if m:
-        stated_m = int(m.group(1))
-        if 0 < stated_m <= 120:
-            return [{"period": f"{stated_m} months", "months": stated_m, "context": m.group(0)}]
+    if not results:
+        m = MONTHS_EXP_RE.search(text) or INTERNSHIP_DURATION_RE.search(text)
+        if m:
+            stated_m = int(m.group(1))
+            if 0 < stated_m <= 120:
+                results.append({"period": f"{stated_m} months", "months": stated_m, "context": m.group(0)})
 
-    return []
+    if include_undated and text:
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or len(line) < 15 or len(line) > 120 or line.startswith(('•', '-', '*', '·')):
+                continue
+            if any(p['period'] in line for p in results if p.get('period') != "Dates not specified"):
+                continue
+            if _DEGREE_RE.search(line) or _classify_heading(line):
+                continue
+            if _WORK_TITLE_RE.search(line) and (_EMPLOYER_RE.search(line) or ' - ' in line or ' at ' in line or ' @ ' in line or '(' in line):
+                if not any(line in p.get('context', '') for p in results):
+                    results.append({"period": "Dates not specified", "months": 0, "context": line})
+
+    return results
 
 
 def extract_experience_months(text: str, now=None) -> int:
