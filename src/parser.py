@@ -183,7 +183,18 @@ _OTHER_HEADINGS = {
     "highlights", "currently learning", "tools", "technologies",
     "tools and technologies", "volunteer", "additional information",
     "selected publications", "leadership roles", "community service",
+    "extra-curricular", "extracurricular", "co-curricular", "cocurricular",
+    "extra-curricular activities", "co-curricular activities",
 }
+
+# Explicit non-work sections (Extracurriculars, Volunteering, Leadership, etc.)
+# Roles/dates under these sections must NEVER appear in work history.
+_NON_WORK_SECTION_RE = re.compile(
+    r"\b(?:extra[\s-]?curricular\w*|co[\s-]?curricular\w*|volunteer\w*|community\s+service|"
+    r"leadership|positions?\s+of\s+responsibility|activities|hobbies|interests|"
+    r"publications?|awards?|honors?|honours?|certificat\w*|achievements?)\b",
+    re.IGNORECASE,
+)
 
 # Regex patterns for flexible section classification
 _EXPERIENCE_HEADING_RE = re.compile(
@@ -201,7 +212,8 @@ _SKILLS_HEADING_RE = re.compile(
 _OTHER_HEADING_RE = re.compile(
     r"\b(?:summary|objective|profile|projects?|certificat(?:ion|ions|es)|achievements?|"
     r"awards?|honors?|honours?|publications?|activities|volunteer(?:ing|s)?|interests?|"
-    r"languages?|affiliations?|references?|coursework|training|declaration|personal\s+details)\b",
+    r"languages?|affiliations?|references?|coursework|training|declaration|personal\s+details|"
+    r"leadership|community\s+service|positions?\s+of\s+responsibility|extra[\s-]?curricular)\b",
     re.IGNORECASE,
 )
 
@@ -477,6 +489,16 @@ def _classify_heading(line: str):
     norm = re.sub(r"\s+", " ", norm).strip()
     if not norm or len(norm.split()) > 6:
         return None
+    # Section headings do not contain date ranges (e.g. 'Aug 2018 - May 2019')
+    if next(_find_ranges(line), None) is not None:
+        return None
+
+    # Strict rejection: If the heading is explicitly extracurricular, volunteering, leadership, etc.,
+    # it must NEVER be classified as work experience even if the word 'experience' or 'work' appears
+    # (e.g. 'Leadership Experience', 'Volunteer Experience', 'Community Service Work', 'Volunteer Work').
+    is_non_work = bool(_NON_WORK_SECTION_RE.search(norm))
+    if is_non_work and not any(w in norm for w in ("work experience", "professional experience", "employment", "career history", "work history")):
+        return "other"
 
     # Direct match on common sets first
     if norm in _EXPERIENCE_HEADINGS:
@@ -491,20 +513,21 @@ def _classify_heading(line: str):
     parts = [p.strip() for p in re.split(r"\s*&\s*|\s*/\s*|\s+and\s+", norm) if p.strip()]
     kinds = []
     for part in parts:
-        if part in _EXPERIENCE_HEADINGS or _EXPERIENCE_HEADING_RE.search(part):
+        part_non_work = bool(_NON_WORK_SECTION_RE.search(part))
+        if not part_non_work and (part in _EXPERIENCE_HEADINGS or _EXPERIENCE_HEADING_RE.search(part)):
             kinds.append("experience")
         elif part in _EDUCATION_HEADINGS or _EDUCATION_HEADING_RE.search(part):
             kinds.append("education")
         elif _SKILLS_HEADING_RE.search(part):
             kinds.append("skills")
-        elif part in _OTHER_HEADINGS or _OTHER_HEADING_RE.search(part):
+        elif part in _OTHER_HEADINGS or _OTHER_HEADING_RE.search(part) or part_non_work:
             kinds.append("other")
         else:
             return None
     if not kinds:
         return None
-    # Priority: experience > education > skills > other
-    if "experience" in kinds:
+    # Priority: experience > education > skills > other (unless is_non_work is true)
+    if "experience" in kinds and not is_non_work:
         return "experience"
     if "education" in kinds:
         return "education"
@@ -540,7 +563,7 @@ def _section_text(text: str, kind: str):
 
 
 def _section_markers(text: str):
-    """Character offsets where each section heading begins."""
+    """Character offsets where each section heading begins: [(offset, heading_kind, raw_heading)]."""
     markers = []
     offset = 0
     for raw in text.splitlines(keepends=True):
@@ -548,15 +571,22 @@ def _section_markers(text: str):
         if line:
             heading = _classify_heading(line)
             if heading:
-                markers.append((offset, heading))
+                markers.append((offset, heading, line))
         offset += len(raw)
     return markers
 
 
+def _section_info_at(markers, positions, idx: int):
+    """Return (kind, heading_text) for character position idx."""
+    i = bisect.bisect_right(positions, idx) - 1
+    if i >= 0:
+        return markers[i][1], markers[i][2]
+    return "preamble", ""
+
+
 def _section_kind_at(markers, positions, idx: int):
     """Which section owns character position idx?"""
-    i = bisect.bisect_right(positions, idx) - 1
-    return markers[i][1] if i >= 0 else "preamble"
+    return _section_info_at(markers, positions, idx)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -752,7 +782,7 @@ def _adjacent_lines(text: str, ls: int, le: int):
 def _work_periods(text: str, now):
     """[(interval, period_text, context)] for every date range that represents a real job or internship."""
     markers = _section_markers(text)
-    positions = [pos for pos, _ in markers]
+    positions = [pos for pos, _, _ in markers]
     periods = []
     for m, parts in _find_ranges(text):
         ls, le = _line_bounds(text, m.start(), m.end())
@@ -761,7 +791,13 @@ def _work_periods(text: str, now):
         own = f"{before} {after}"
         own_has_title = bool(_WORK_TITLE_RE.search(own))
 
-        sec_kind = _section_kind_at(markers, positions, m.start())
+        sec_kind, sec_heading = _section_info_at(markers, positions, m.start())
+
+        # Strict rejection: Reject entries that appear under "Extra-Curricular Activities,"
+        # "Volunteering," "Leadership," or similar non-work sections.
+        if sec_heading and _NON_WORK_SECTION_RE.search(sec_heading):
+            continue
+
         if sec_kind in ("education", "other"):
             context_line = own
             if le - ls <= 140:
@@ -789,6 +825,8 @@ def _work_periods(text: str, now):
         context = own
         if le - ls <= 140:
             context += " " + " ".join(_adjacent_lines(text, ls, le))
+        if _UNPAID_ROLE_RE.search(context):
+            continue
         if not (_WORK_TITLE_RE.search(context) or _EMPLOYER_RE.search(context)):
             continue
 
@@ -876,13 +914,21 @@ def extract_work_periods(text: str, now=None, include_undated: bool = True):
                 results.append({"period": f"{stated_m} months", "months": stated_m, "context": m.group(0)})
 
     if include_undated and text:
-        for raw_line in text.splitlines():
+        markers = _section_markers(text)
+        positions = [pos for pos, _, _ in markers]
+        cur_offset = 0
+        for raw_line in text.splitlines(keepends=True):
             line = raw_line.strip()
+            line_pos = cur_offset
+            cur_offset += len(raw_line)
             if not line or len(line) < 15 or len(line) > 120 or line.startswith(('•', '-', '*', '·')):
                 continue
             if any(p['period'] in line for p in results if p.get('period') != "Dates not specified"):
                 continue
-            if _DEGREE_RE.search(line) or _classify_heading(line):
+            if _DEGREE_RE.search(line) or _classify_heading(line) or _UNPAID_ROLE_RE.search(line):
+                continue
+            _, sec_heading = _section_info_at(markers, positions, line_pos)
+            if sec_heading and _NON_WORK_SECTION_RE.search(sec_heading):
                 continue
             if _WORK_TITLE_RE.search(line) and (_EMPLOYER_RE.search(line) or ' - ' in line or ' at ' in line or ' @ ' in line or '(' in line):
                 if not any(line in p.get('context', '') for p in results):

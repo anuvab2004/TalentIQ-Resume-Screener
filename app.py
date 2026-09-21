@@ -883,6 +883,124 @@ def _render_pdf_document(pdf_bytes: bytes, max_pages: int = 5, key_prefix: str =
             st.warning("Could not render PDF preview. Please download the file below to view.")
 
 
+def _render_docx_document(docx_bytes: bytes, max_height: int = 550, key_prefix: str = "docx"):
+    """Renders a Word DOCX document with its actual rich visual layout:
+    headings, bold/italic/underlined text runs, bullet lists, and styled tables.
+    Mimics a document sheet reader instead of flattening to raw plain text.
+    """
+    if not docx_bytes:
+        st.info("No DOCX data available.")
+        return
+
+    try:
+        import docx
+        from docx.text.paragraph import Paragraph
+        from docx.table import Table
+
+        doc = docx.Document(io.BytesIO(docx_bytes))
+        html_chunks = []
+
+        for element in doc.element.body:
+            tag_name = element.tag.split("}")[-1] if "}" in element.tag else element.tag
+
+            # 1. Paragraphs & Headings
+            if tag_name == "p":
+                p = Paragraph(element, doc)
+                text = p.text.strip()
+                if not text:
+                    continue
+
+                style_name = (p.style.name if p.style else "").lower()
+
+                # Build rich formatted inner content with run styles (bold, italic, underline)
+                run_spans = []
+                for r in p.runs:
+                    r_txt = html.escape(r.text)
+                    if not r_txt:
+                        continue
+                    if r.bold:
+                        r_txt = f"<strong>{r_txt}</strong>"
+                    if r.italic:
+                        r_txt = f"<em>{r_txt}</em>"
+                    if r.underline:
+                        r_txt = f"<u>{r_txt}</u>"
+                    run_spans.append(r_txt)
+
+                inner_html = "".join(run_spans) if run_spans else html.escape(text)
+
+                if "title" in style_name:
+                    html_chunks.append(
+                        f'<h1 style="font-size:1.45rem;font-weight:800;color:#0f172a;margin:14px 0 6px 0;line-height:1.25;border-bottom:2px solid #e2e8f0;padding-bottom:4px;">{inner_html}</h1>'
+                    )
+                elif "heading 1" in style_name:
+                    html_chunks.append(
+                        f'<h2 style="font-size:1.2rem;font-weight:700;color:#1e293b;margin:12px 0 4px 0;line-height:1.3;border-bottom:1px solid #cbd5e1;padding-bottom:3px;">{inner_html}</h2>'
+                    )
+                elif "heading 2" in style_name or "heading 3" in style_name:
+                    html_chunks.append(
+                        f'<h3 style="font-size:1.05rem;font-weight:600;color:#334155;margin:10px 0 3px 0;line-height:1.3;">{inner_html}</h3>'
+                    )
+                elif "list" in style_name or text.startswith(("•", "·", "-", "*")):
+                    # Strip leading bullet symbol for clean styled list item
+                    cleaned_bullet = re.sub(r"^[•·\-\*]\s*", "", inner_html)
+                    html_chunks.append(
+                        f'<div style="display:flex;align-items:baseline;margin:3px 0 3px 14px;color:#334155;font-size:0.875rem;line-height:1.5;">'
+                        f'<span style="color:#6366f1;font-weight:bold;margin-right:8px;">•</span>'
+                        f'<div>{cleaned_bullet}</div></div>'
+                    )
+                else:
+                    html_chunks.append(
+                        f'<p style="margin:4px 0 6px 0;color:#334155;font-size:0.88rem;line-height:1.55;">{inner_html}</p>'
+                    )
+
+            # 2. Tables
+            elif tag_name == "tbl":
+                table = Table(element, doc)
+                tbl_rows = []
+                for r_idx, row in enumerate(table.rows):
+                    row_cells = []
+                    for c_idx, cell in enumerate(row.cells):
+                        cell_txt = html.escape(cell.text.strip())
+                        is_header = (r_idx == 0)
+                        tag = "th" if is_header else "td"
+                        bg_style = "background:#f8fafc;font-weight:600;color:#1e293b;" if is_header else "color:#334155;"
+                        row_cells.append(
+                            f'<{tag} style="padding:6px 10px;border:1px solid #cbd5e1;font-size:0.84rem;text-align:left;{bg_style}">{cell_txt}</{tag}>'
+                        )
+                    if row_cells:
+                        tbl_rows.append(f'<tr>{"".join(row_cells)}</tr>')
+
+                if tbl_rows:
+                    html_chunks.append(
+                        f'<table style="width:100%;border-collapse:collapse;margin:10px 0 14px 0;background:#ffffff;border-radius:6px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,0.05);">'
+                        f'{"".join(tbl_rows)}</table>'
+                    )
+
+        if html_chunks:
+            full_doc_html = (
+                f'<div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;'
+                f'padding:20px 24px;max-height:{max_height}px;overflow-y:auto;box-shadow:0 2px 8px rgba(15,23,42,0.06);'
+                f'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">'
+                f'{"".join(html_chunks)}'
+                f'</div>'
+            )
+            st.markdown(full_doc_html, unsafe_allow_html=True)
+        else:
+            # Fallback to plain text if no body elements parsed
+            from src.parser import extract_text_from_docx
+            doc_text = extract_text_from_docx(docx_bytes)
+            st.text_area("Original Document Text", value=doc_text, height=max_height, disabled=True, key=f"docx_fb_{key_prefix}")
+
+    except Exception as ex:
+        # Graceful fallback
+        from src.parser import extract_text_from_docx
+        try:
+            doc_text = extract_text_from_docx(docx_bytes)
+        except Exception:
+            doc_text = docx_bytes.decode("utf-8", errors="replace")
+        st.text_area("Original Document Text", value=doc_text, height=max_height, disabled=True, key=f"docx_err_{key_prefix}")
+
+
 def _get_submitted_resume_bytes(result, rid):
     """Retrieve original file bytes for the submitted resume (memory cache, sample dir, or Supabase)."""
     fname = getattr(result, "filename", "") or ""
@@ -1118,14 +1236,10 @@ def candidate_profile_dialog(rid, result):
                 st.markdown(f"###### 📥 Original Submitted Resume &nbsp;`{sub_fname or 'Document'}`")
                 if sub_bytes and sub_ext == "pdf":
                     _render_pdf_document(sub_bytes, max_pages=3, key_prefix=f"side_{key_prefix}")
+                elif sub_bytes and sub_ext == "docx":
+                    _render_docx_document(sub_bytes, max_height=480, key_prefix=f"side_{key_prefix}")
                 else:
-                    if sub_bytes and sub_ext == "docx":
-                        from src.parser import extract_text_from_docx
-                        try:
-                            display_orig = extract_text_from_docx(sub_bytes)
-                        except Exception:
-                            display_orig = sub_bytes.decode("utf-8", errors="replace")
-                    elif sub_bytes:
+                    if sub_bytes:
                         display_orig = sub_bytes.decode("utf-8", errors="replace")
                     else:
                         display_orig = raw_resume_text
@@ -1193,14 +1307,10 @@ def candidate_profile_dialog(rid, result):
             st.markdown(f"##### Full Submitted Document: `{sub_fname or 'Candidate Resume'}`")
             if sub_bytes and sub_ext == "pdf":
                 _render_pdf_document(sub_bytes, max_pages=8, key_prefix=f"full_{key_prefix}")
+            elif sub_bytes and sub_ext == "docx":
+                _render_docx_document(sub_bytes, max_height=700, key_prefix=f"full_{key_prefix}")
             else:
-                if sub_bytes and sub_ext == "docx":
-                    from src.parser import extract_text_from_docx
-                    try:
-                        doc_text = extract_text_from_docx(sub_bytes)
-                    except Exception:
-                        doc_text = sub_bytes.decode("utf-8", errors="replace")
-                elif sub_bytes:
+                if sub_bytes:
                     doc_text = sub_bytes.decode("utf-8", errors="replace")
                 else:
                     doc_text = raw_resume_text

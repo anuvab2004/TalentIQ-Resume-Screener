@@ -449,7 +449,50 @@ class ParserRegressionSuite(unittest.TestCase):
         self.assertNotIn("Access", skills_4)
         self.assertNotIn("Backup", skills_4)
 
+    def test_21_extracurricular_and_volunteer_rejected_from_work_history(self):
+        # The parser treated an extra-curricular activity as a job. That's a real bug — extra-curriculars
+        # should not appear in work history.
+        # Fix: Only parse work history from the Experience section. Reject entries that appear under
+        # "Extra-Curricular Activities," "Volunteering," "Leadership," or similar sections.
+        resume_text = """
+        Alex Chen
+        alex.chen@example.com | 555-123-4567
+
+        Professional Experience
+        Software Engineer, Datacorp Inc.   Jan 2022 - Dec 2023
+        - Built data ingestion pipelines in Python.
+
+        Leadership & Extra-Curricular Activities
+        President, University Chess Club   Sep 2020 - Jun 2021
+        - Organized campus tournaments and managed club budget.
+        Lead Organizer, CodeCamp Hackathon   Mar 2021 - May 2021
+        - Coordinated logistics for 200 attendees.
+
+        Volunteering & Community Service
+        Volunteer Coordinator, Community Food Bank   Jan 2019 - Dec 2019
+        - Distributed meals and assisted operations.
+
+        Positions of Responsibility
+        Student Representative, Academic Committee   Aug 2018 - May 2019
+        - Represented department students in faculty meetings.
+        """
+        doc = parse_document("alex_chen.txt", resume_text.encode("utf-8"))
+        work_periods = extract_work_periods(resume_text, now=NOW, include_undated=True)
+
+        # Only Software Engineer at Datacorp Inc should be in work history (24 months = 2.0 years)
+        self.assertEqual(len(work_periods), 1)
+        self.assertIn("Datacorp Inc", work_periods[0]["context"])
+        self.assertAlmostEqual(doc.years_experience, 2.0)
+
+        # None of the extracurricular / volunteer / leadership roles should appear in periods
+        all_contexts = " ".join(p["context"] for p in work_periods)
+        self.assertNotIn("Chess Club", all_contexts)
+        self.assertNotIn("Food Bank", all_contexts)
+        self.assertNotIn("Hackathon", all_contexts)
+        self.assertNotIn("Academic Committee", all_contexts)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
