@@ -88,9 +88,10 @@ def embeddings_available() -> bool:
     global _EMBEDDINGS_AVAILABLE
     if _EMBEDDINGS_AVAILABLE is None:
         try:
-            import sentence_transformers  # noqa: F401
+            import importlib
+            importlib.import_module("sentence_transformers")
             _EMBEDDINGS_AVAILABLE = True
-        except ImportError:
+        except (ImportError, Exception):
             _EMBEDDINGS_AVAILABLE = False
     return _EMBEDDINGS_AVAILABLE
 
@@ -99,7 +100,11 @@ def _get_embedding_model():
     global _EMBEDDING_MODEL
 
     if _EMBEDDING_MODEL is None:
-        from sentence_transformers import SentenceTransformer
+        if not embeddings_available():
+            return None
+        import importlib
+        st_module = importlib.import_module("sentence_transformers")
+        SentenceTransformer = getattr(st_module, "SentenceTransformer")
 
         _EMBEDDING_MODEL = SentenceTransformer(
             EMBEDDING_MODEL_NAME
@@ -113,6 +118,8 @@ def preload_embedding_model():
     Load the embedding model once when the application starts.
     Later screening calls reuse the same model from memory.
     """
+    if not embeddings_available():
+        return None
     return _get_embedding_model()
 
 
@@ -205,6 +212,8 @@ def _semantic_relevance_embeddings(resume_text: str, jd_text: str) -> float:
     try:
         import numpy as np
         model = _get_embedding_model()
+        if model is None:
+            return _semantic_relevance_tfidf(resume_text, jd_text)
         r_vec = _embed_mean(resume_text, model)
         j_vec = _embed_mean(jd_text, model)
         sim = float(np.dot(r_vec, j_vec) / (np.linalg.norm(r_vec) * np.linalg.norm(j_vec) + 1e-9))
