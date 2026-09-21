@@ -319,6 +319,59 @@ class ParserRegressionSuite(unittest.TestCase):
         self.assertIn("gate_cap_applied", res1.factors)
         self.assertIn("Kubernetes", res1.factors["gate_cap_applied"])
 
+    def test_16_present_date_resolution(self):
+        import datetime as dt
+        from src.parser import extract_work_periods
+        # Maintain single source of truth for "today" from system clock
+        today = dt.date.today()
+        sample = """
+        John Doe
+        john@example.com
+        Experience
+        Senior Software Engineer, Tech Corp   Jan 2020 - Present
+        Education
+        B.S. Computer Science   2015 - 2019
+        """
+        doc = parse_document("john.txt", sample.encode("utf-8"))
+        # Verify resolved_present_date is logged in parser output
+        self.assertEqual(doc.resolved_present_date, today.isoformat())
+        
+        # Test synonyms: "Till date", "To date", "Ongoing", "Now"
+        sample_till = """
+        Jane Doe
+        jane@example.com
+        Experience
+        Staff Developer, Dev Corp   Jan 2020 - Till date
+        """
+        periods_till = extract_work_periods(sample_till)
+        self.assertTrue(len(periods_till) > 0)
+        self.assertTrue(periods_till[0].get("is_present"))
+
+    def test_17_duplicate_role_deduplication(self):
+        # A resume with duplicated sections or identical roles must be deduplicated
+        sample_dup = """
+        Alex Smith
+        alex@example.com
+        Experience
+        Software Developer, Acme Corp   Jan 2020 - Dec 2022
+        
+        Software Developer, Acme Corp   Jan 2020 - Dec 2022
+        
+        Software Developer, Acme Corp   Jan 2020 - Dec 2022
+        """
+        doc = parse_document("alex.txt", sample_dup.encode("utf-8"))
+        # 3 years total (36 months), not 9 years
+        self.assertEqual(doc.experience_months, 36)
+        self.assertEqual(doc.years_experience, 3.0)
+
+    def test_18_machine_learning_jd_min_years(self):
+        from src.sample_data import list_sample_jds
+        jds = list_sample_jds()
+        self.assertIn("Machine Learning", jds)
+        parsed = parse_job_description(jds["Machine Learning"])
+        # "At least 3 years of hands-on development" must resolve to 3.0 years
+        self.assertEqual(parsed["min_years"], 3.0)
+
 
 if __name__ == "__main__":
     unittest.main()

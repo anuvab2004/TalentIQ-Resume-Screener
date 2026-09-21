@@ -53,11 +53,11 @@ PHONE_ID_LABEL_RE = re.compile(
 )
 
 # "5 years of experience", "5+ yrs hands-on experience", "1.5 years experience",
-# "3-5 years of professional experience" (captures the lower bound).
+# "3-5 years of professional experience", "At least 3 years of hands-on development"
 YEARS_EXP_RE = re.compile(
-    r"(?<![\d.])(\d{1,2}(?:\.\d)?)(?:\s*(?:-|–|—|to)\s*\d{1,2})?\s*\+?\s*(?:years?|yrs?)\.?\s*(?:of\s+)?"
+    r"(?<![\d.])(?:\b(?:at\s+least|minimum|min|over|\+)\s*)?(\d{1,2}(?:\.\d)?)(?:\s*(?:-|–|—|to)\s*\d{1,2})?\s*\+?\s*(?:years?|yrs?)\.?\s*(?:of\s+)?"
     r"(?:(?:relevant|professional|hands-on|industry|work|working|total|overall|proven|it|technical|software|commercial|engineering|field|practical)\s+)*"
-    r"experience",
+    r"(?:experience|development|engineering|work|background)\b",
     re.IGNORECASE,
 )
 
@@ -73,13 +73,13 @@ INTERNSHIP_DURATION_RE = re.compile(
 )
 
 DATE_RANGE_RE = re.compile(
-    r"(19|20)\d{2}\s*(?:-|to|–|—)\s*(?:(19|20)\d{2}|present|current)",
+    r"(19|20)\d{2}\s*(?:-|to|–|—)\s*(?:(19|20)\d{2}|present|current|now|ongoing|today|till\s+date|to\s+date)",
     re.IGNORECASE,
 )
 # A bare "2019-2023"-style year range satisfies the phone digit-count shape too;
 # filter those out so employment date ranges never get mistaken for a phone number.
 YEAR_RANGE_LOOKALIKE_RE = re.compile(
-    r"^(?:19|20)\d{2}[\s.-]*(?:(?:19|20)\d{2}|present|current)$", re.IGNORECASE
+    r"^(?:19|20)\d{2}[\s.-]*(?:(?:19|20)\d{2}|present|current|now|ongoing|today|till\s+date|to\s+date)$", re.IGNORECASE
 )
 
 # ---------------------------------------------------------------------------
@@ -271,6 +271,7 @@ class ParsedDocument:
     parse_confidence: float = 1.0
     confidence_reasons: list = field(default_factory=list)
     input_hash: str = ""
+    resolved_present_date: str = ""
 
 
 def clean_doubled_text(text: str) -> str:
@@ -580,7 +581,7 @@ _MONTH_NUM = {
 _YEAR_PAT = r"(?:19|20)\d{2}"
 _TWO_DIGIT_YEAR_PAT = r"(?:'|’)?\d{2}"
 _SEP_PAT = r"\s*(?:[-–—‒―‑−－]|\bto\b|\buntil\b|\btill\b)\s*"
-_PRESENT_PAT = r"(?:present|current|now|ongoing|today|date)"
+_PRESENT_PAT = r"(?:present|current|now|ongoing|today|till\s+date|to\s+date|date)"
 
 # 'Jan 2020 - Mar 2022', '2019 - 2023', '2023 - Present', 'Dec 2013 to Current', 'Jun \'18 - Aug \'20'
 _RANGE_FULL_RE = re.compile(
@@ -795,8 +796,29 @@ def _work_periods(text: str, now):
         if iv:
             snippet = re.sub(r"\s+", " ", f"{before[-90:]}{m.group(0)}{after[:45]}").strip()
             is_present = bool(parts[4])
-            periods.append((iv, m.group(0).strip(), snippet, is_present))
-    return periods
+            periods.append((iv, m.group(0).strip(), snippet, is_present, context))
+
+    # Deduplicate roles by (company, title, start_date, end_date) composite key
+    # before merging intervals and summing.
+    deduped_periods = []
+    seen_role_keys = set()
+
+    for item in periods:
+        iv, date_str, snippet, is_present, ctx = item
+        # Extract title and company keywords for the composite key
+        title_m = _WORK_TITLE_RE.search(ctx)
+        title_key = title_m.group(0).lower() if title_m else ""
+        emp_m = _EMPLOYER_RE.search(ctx)
+        emp_key = emp_m.group(0).lower() if emp_m else ""
+        
+        # Composite key: (company, title, start_month_idx, end_month_idx)
+        role_key = (emp_key, title_key, iv[0], iv[1])
+        if role_key in seen_role_keys:
+            continue
+        seen_role_keys.add(role_key)
+        deduped_periods.append((iv, date_str, snippet, is_present))
+
+    return deduped_periods
 
 
 def _merged_months(intervals) -> int:
@@ -1312,6 +1334,7 @@ def parse_document(filename: str, file_bytes: bytes, extra_skills: list = None) 
     edu = extract_education(text)
 
     input_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+    today_iso = _dt.date.today().isoformat()
 
     doc = ParsedDocument(
         raw_text=text,
@@ -1324,6 +1347,7 @@ def parse_document(filename: str, file_bytes: bytes, extra_skills: list = None) 
         experience_months=exp_months,
         skills=skills,
         input_hash=input_hash,
+        resolved_present_date=today_iso,
     )
 
     conf_score, conf_reasons = compute_parse_confidence(doc, text)
