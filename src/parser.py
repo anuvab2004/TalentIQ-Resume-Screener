@@ -55,7 +55,7 @@ PHONE_ID_LABEL_RE = re.compile(
 # "3-5 years of professional experience" (captures the lower bound).
 YEARS_EXP_RE = re.compile(
     r"(?<![\d.])(\d{1,2}(?:\.\d)?)(?:\s*(?:-|–|—|to)\s*\d{1,2})?\s*\+?\s*(?:years?|yrs?)\.?\s*(?:of\s+)?"
-    r"(?:(?:relevant|professional|hands-on|industry|work|working|total|overall|proven)\s+)*"
+    r"(?:(?:relevant|professional|hands-on|industry|work|working|total|overall|proven|it|technical|software|commercial|engineering|field|practical)\s+)*"
     r"experience",
     re.IGNORECASE,
 )
@@ -647,7 +647,8 @@ def _work_periods(text: str, now):
         iv = _interval(*parts, now)
         if iv:
             snippet = re.sub(r"\s+", " ", f"{before[-90:]}{m.group(0)}{after[:45]}").strip()
-            periods.append((iv, m.group(0).strip(), snippet))
+            is_present = bool(parts[4])
+            periods.append((iv, m.group(0).strip(), snippet, is_present))
     return periods
 
 
@@ -671,10 +672,31 @@ def extract_work_periods(text: str, now=None, include_undated: bool = True):
     periods = _work_periods(text, now)
     results = []
     if periods:
-        results = [
-            {"period": period, "months": iv[1] - iv[0], "context": ctx}
-            for iv, period, ctx in periods
-        ]
+        has_present = any(item[3] for item in periods if len(item) > 3)
+        total_m = _merged_months([item[0] for item in periods])
+        reconciled_cap = None
+        if has_present:
+            claims = [float(match.group(1)) for match in YEARS_EXP_RE.finditer(text)]
+            claims = [c for c in claims if 0 < c <= 50]
+            if claims:
+                stated_m = round(max(claims) * 12)
+                if total_m > stated_m + 12:
+                    closed_m = _merged_months([item[0] for item in periods if len(item) > 3 and not item[3]])
+                    reconciled_cap = max(closed_m, stated_m)
+
+        for item in periods:
+            iv, period, ctx = item[0], item[1], item[2]
+            is_pres = item[3] if len(item) > 3 else False
+            m_cnt = iv[1] - iv[0]
+            if is_pres and reconciled_cap is not None:
+                other_m = _merged_months([it[0] for it in periods if it is not item])
+                m_cnt = max(1, reconciled_cap - other_m)
+            results.append({
+                "period": period,
+                "months": m_cnt,
+                "context": ctx,
+                "is_present": is_pres,
+            })
 
     # Stated internship duration fallback (e.g. '3 months internship')
     if not results:
@@ -706,7 +728,23 @@ def extract_experience_months(text: str, now=None) -> int:
     now = now or _dt.date.today()
     periods = _work_periods(text, now)
     if periods:
-        return _merged_months([iv for iv, _, _ in periods])
+        has_present = any(item[3] for item in periods if len(item) > 3)
+        total_m = _merged_months([item[0] for item in periods])
+
+        # When an open-ended role ("to Current" / "to Present") exists, check if the candidate
+        # explicitly stated their overall experience claim in the resume text (e.g. "5 years of experience").
+        # If the open-ended calculation with today's date vastly exceeds their stated claim,
+        # it indicates an older/benchmark resume where "Current" meant the date of authoring.
+        if has_present:
+            claims = [float(match.group(1)) for match in YEARS_EXP_RE.finditer(text)]
+            claims = [c for c in claims if 0 < c <= 50]
+            if claims:
+                stated_m = round(max(claims) * 12)
+                if total_m > stated_m + 12:
+                    closed_m = _merged_months([item[0] for item in periods if len(item) > 3 and not item[3]])
+                    return max(closed_m, stated_m)
+
+        return total_m
 
     m = MONTHS_EXP_RE.search(text) or INTERNSHIP_DURATION_RE.search(text)
     if m:

@@ -313,7 +313,19 @@ Product & Web Developer Intern - Baha (studiobaha.com)
         self.assertEqual(jd["min_years"], 0.25)
         self.assertTrue(jd["is_internship"])
 
+    def test_open_ended_role_reconciled_with_stated_claim(self):
+        text = """
+        Sourav Das
+        Skills: JavaScript, 5 years of experience SQL, 5 years of experience
+        Work History
+        Software Developer , 12/2015 to Current Company Name
+        Computer Engineer Intern , 06/2013 to 09/2013 Company Name
+        """
+        months = extract_experience_months(text, now=NOW)
+        self.assertEqual(months, 60)
+        self.assertEqual(extract_years_experience(text, now=NOW), 5.0)
 
 
 if __name__ == "__main__":
     unittest.main()
+

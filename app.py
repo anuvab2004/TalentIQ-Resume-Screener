@@ -767,7 +767,8 @@ def page_upload():
         )
 
         st.balloons()
-        
+        import time
+        time.sleep(0.8)
         # Ask the next rerun to open Candidate Intelligence.
         # We use a separate flag because current_page belongs to the
         # Streamlit radio widget and should not be changed after it is created.
@@ -940,7 +941,31 @@ def candidate_profile_dialog(rid, result):
             result.experience_months = calc_m
             result.years_experience = round(calc_m / 12, 1)
 
-    st.caption(f"Education: {result.education}  ·  Experience: {format_experience(result.years_experience, getattr(result, 'experience_months', None))}")
+    exp_info_col, exp_btn_col = st.columns([4, 1.2])
+    with exp_info_col:
+        st.caption(f"Education: **{result.education}**  ·  Experience: **{format_experience(result.years_experience, getattr(result, 'experience_months', None))}**")
+    with exp_btn_col:
+        with st.popover("✏️ Edit Exp"):
+            new_exp = st.number_input(
+                "Verified Exp (Yrs)",
+                min_value=0.0,
+                max_value=50.0,
+                value=float(result.years_experience or 0.0),
+                step=0.5,
+                key=f"edit_exp_{rid}_{result.candidate_id}",
+            )
+            if st.button("Save", key=f"save_exp_btn_{rid}_{result.candidate_id}", type="primary"):
+                result.years_experience = float(new_exp)
+                result.experience_months = round(float(new_exp) * 12)
+                db.update_candidate_experience(
+                    rid,
+                    result.candidate_name,
+                    result.years_experience,
+                    result.experience_months,
+                    user_id=current_user_id(),
+                )
+                st.success(f"Experience updated to {new_exp} yrs")
+                st.rerun()
 
     detected_periods = extract_work_periods(raw_resume_text)
     if detected_periods:

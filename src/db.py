@@ -449,6 +449,25 @@ def update_candidate_action(req_id: str, candidate_name: str, action: str, user_
         return False
 
 
+def update_candidate_experience(req_id: str, candidate_name: str, years_exp: float, exp_months: int, user_id: Optional[str] = None) -> bool:
+    """Update verified candidate experience in Supabase scoped to user_id."""
+    client = get_client()
+    if not client:
+        return False
+    try:
+        db_id = _scoped_req_id(req_id, user_id)
+        client.table("candidates").update({
+            "years_experience": years_exp,
+            "experience_months": exp_months
+        })\
+            .eq("req_id", db_id)\
+            .eq("candidate_name", candidate_name)\
+            .execute()
+        return True
+    except Exception:
+        return False
+
+
 def fetch_all_candidate_actions(user_id: Optional[str] = None) -> Dict[Tuple[str, str], str]:
     """Fetch HR actions mapping (req_id, candidate_name) -> status scoped to user_id."""
     client = get_client()
