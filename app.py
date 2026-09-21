@@ -6,6 +6,7 @@ semantic + skill matching, and full per-candidate explainability.
 import datetime as dt
 import html
 import io
+import re
 from zoneinfo import ZoneInfo
 
 import pandas as pd
