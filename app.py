@@ -135,8 +135,9 @@ def init_state():
     ss.setdefault("default_weights", dict(WEIGHTS))  # org-wide default scoring weights (fractions summing to 1.0)
     ss.setdefault("custom_skills", [])      # extra taxonomy terms recruiters have added (e.g. LangGraph, vLLM)
     if "_ai_warmed" not in ss:
-        load_ai_model()
         ss["_ai_warmed"] = True
+        import threading
+        threading.Thread(target=load_ai_model, daemon=True).start()
     # Organization identity, workspace defaults and SMTP credentials are
     # PERSISTENT: loaded from disk once per new session (see src/settings_store.py)
     # so they survive page refreshes and app restarts until the user changes them.
@@ -985,7 +986,39 @@ def build_profile_text(result):
     return "\n".join(lines)
 
 
+def scroll_to_top():
+    """Ensure the page viewport resets to the top when navigating."""
+    import streamlit.components.v1 as components
+    components.html(
+        """
+        <script>
+            function doScroll() {
+                try {
+                    const selectors = ['[data-testid="stMain"]', 'section.main', '[data-testid="stAppViewContainer"]'];
+                    for (const sel of selectors) {
+                        const el = window.parent.document.querySelector(sel);
+                        if (el) {
+                            el.scrollTop = 0;
+                        }
+                    }
+                    window.parent.scrollTo(0, 0);
+                    const topbar = window.parent.document.querySelector('.tiq-topbar');
+                    if (topbar) {
+                        topbar.scrollIntoView({behavior: 'instant', block: 'start'});
+                    }
+                } catch (e) {}
+            }
+            doScroll();
+            setTimeout(doScroll, 80);
+            setTimeout(doScroll, 250);
+        </script>
+        """,
+        height=0,
+    )
+
+
 def page_candidates():
+    scroll_to_top()
     styling.topbar(st, "Candidate Intelligence")
 
     reqs = st.session_state["requisitions"]
