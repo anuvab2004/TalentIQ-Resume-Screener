@@ -927,7 +927,7 @@ def candidate_profile_dialog(rid, result):
         "education_evidence": "Education Evidence",
     }
     for key, label in factor_labels.items():
-        val = result.factors[key]
+        val = float(result.factors.get(key) or 0) if isinstance(result.factors, dict) else 0.0
         st.write(f"{label} — **{val:.0f}%**")
         st.progress(min(max(val / 100, 0), 1.0))
 
@@ -1077,8 +1077,20 @@ def build_profile_text(result):
         f"",
         "Factor Breakdown:",
     ]
-    for k, v in result.factors.items():
-        lines.append(f"  - {k.replace('_', ' ').title()}: {v:.0f}%")
+    factor_labels = {
+        "semantic_relevance": "Semantic Relevance",
+        "skill_alignment": "Skill Alignment",
+        "experience_evidence": "Experience Evidence",
+        "education_evidence": "Education Evidence",
+    }
+    if isinstance(result.factors, dict):
+        for k, label in factor_labels.items():
+            v = result.factors.get(k)
+            if v is not None:
+                try:
+                    lines.append(f"  - {label}: {float(v):.0f}%")
+                except (ValueError, TypeError):
+                    pass
     lines += [
         "",
         f"Why This Match: {result.rationale}",
@@ -1248,10 +1260,10 @@ def page_candidates():
         "Portfolio": _social_url(r, "portfolio_url"),
         "Score": r.overall_score,
         "Status": r.status,
-        "Semantic Relevance": r.factors["semantic_relevance"],
-        "Skill Alignment": r.factors["skill_alignment"],
-        "Experience Evidence": r.factors["experience_evidence"],
-        "Education Evidence": r.factors["education_evidence"],
+        "Semantic Relevance": r.factors.get("semantic_relevance", 0) if isinstance(r.factors, dict) else 0,
+        "Skill Alignment": r.factors.get("skill_alignment", 0) if isinstance(r.factors, dict) else 0,
+        "Experience Evidence": r.factors.get("experience_evidence", 0) if isinstance(r.factors, dict) else 0,
+        "Education Evidence": r.factors.get("education_evidence", 0) if isinstance(r.factors, dict) else 0,
         "Experience": format_experience(r.years_experience, getattr(r, "experience_months", None)),
         "Experience (yrs)": r.years_experience,
         "Education": r.education,
@@ -1307,10 +1319,10 @@ def candidate_comparison_panel(rid, results):
     rows = [
         {"Metric": "Overall Score", **{col_name[c.candidate_id]: f"{c.overall_score:.0f}/100" for c in chosen}},
         {"Metric": "Status", **{col_name[c.candidate_id]: c.status for c in chosen}},
-        {"Metric": "Semantic Relevance", **{col_name[c.candidate_id]: f"{c.factors['semantic_relevance']:.0f}%" for c in chosen}},
-        {"Metric": "Skill Alignment", **{col_name[c.candidate_id]: f"{c.factors['skill_alignment']:.0f}%" for c in chosen}},
-        {"Metric": "Experience Evidence", **{col_name[c.candidate_id]: f"{c.factors['experience_evidence']:.0f}%" for c in chosen}},
-        {"Metric": "Education Evidence", **{col_name[c.candidate_id]: f"{c.factors['education_evidence']:.0f}%" for c in chosen}},
+        {"Metric": "Semantic Relevance", **{col_name[c.candidate_id]: f"{float(c.factors.get('semantic_relevance') or 0):.0f}%" for c in chosen if isinstance(c.factors, dict)}},
+        {"Metric": "Skill Alignment", **{col_name[c.candidate_id]: f"{float(c.factors.get('skill_alignment') or 0):.0f}%" for c in chosen if isinstance(c.factors, dict)}},
+        {"Metric": "Experience Evidence", **{col_name[c.candidate_id]: f"{float(c.factors.get('experience_evidence') or 0):.0f}%" for c in chosen if isinstance(c.factors, dict)}},
+        {"Metric": "Education Evidence", **{col_name[c.candidate_id]: f"{float(c.factors.get('education_evidence') or 0):.0f}%" for c in chosen if isinstance(c.factors, dict)}},
         {"Metric": "Experience", **{col_name[c.candidate_id]: format_experience(c.years_experience, getattr(c, "experience_months", None)) for c in chosen}},
         {"Metric": "Education", **{col_name[c.candidate_id]: c.education for c in chosen}},
         {"Metric": "Matched Skills (#)", **{col_name[c.candidate_id]: str(len(c.matched_skills)) for c in chosen}},
