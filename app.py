@@ -3,6 +3,7 @@ TalentIQ — AI Resume Screener & Job Matcher
 Hackathon build: HR-side, end-to-end resume screening with bulk upload,
 semantic + skill matching, and full per-candidate explainability.
 """
+import base64
 import datetime as dt
 import html
 import io
@@ -702,6 +703,8 @@ def page_upload():
 
             parsed_resumes.append(doc)
             filenames.append(fname)
+            st.session_state.setdefault("resume_files", {})[(rid, fname)] = fbytes
+            st.session_state["resume_files"][fname] = fbytes
             import threading
             threading.Thread(
                 target=db.upload_resume_file,
@@ -830,6 +833,54 @@ def clear_requisition_candidates(rid: str, user_id: str = None):
     logs = st.session_state.get("email_log", {})
     for k in [k for k in list(logs.keys()) if k[0] == rid]:
         logs.pop(k, None)
+
+
+def _get_submitted_resume_bytes(result, rid):
+    """Retrieve original file bytes for the submitted resume (memory cache, sample dir, or Supabase)."""
+    fname = getattr(result, "filename", "") or ""
+    # 1. In-memory cache from recent upload
+    if "resume_files" in st.session_state and isinstance(st.session_state["resume_files"], dict):
+        b = st.session_state["resume_files"].get((rid, fname)) or st.session_state["resume_files"].get(fname)
+        if b:
+            return fname, b
+
+    # 2. Match directly by filename in sample resumes
+    if fname:
+        try:
+            if fname in list_sample_resumes():
+                return fname, load_sample_resume_bytes(fname)
+            cand_txt = fname if fname.endswith(".txt") else f"{fname}.txt"
+            if cand_txt in list_sample_resumes():
+                return cand_txt, load_sample_resume_bytes(cand_txt)
+        except Exception:
+            pass
+
+    # 3. Match candidate name slug in sample resumes
+    cand_name = getattr(result, "candidate_name", "")
+    if cand_name:
+        cand_slug = re.sub(r"[^a-zA-Z0-9_]", "_", cand_name.lower().strip()) + ".txt"
+        if cand_slug in list_sample_resumes():
+            try:
+                return cand_slug, load_sample_resume_bytes(cand_slug)
+            except Exception:
+                pass
+
+    # 4. Download from Supabase Storage
+    if fname:
+        try:
+            b = db.download_resume_file(fname, req_id=rid, user_id=current_user_id())
+            if b:
+                return fname, b
+        except Exception:
+            pass
+
+    # 5. Fallback: if raw_text exists, return it as encoded utf-8 bytes
+    raw_text = getattr(result, "raw_text", "") or ""
+    if raw_text:
+        fallback_name = fname or (re.sub(r"[^a-zA-Z0-9_]", "_", cand_name.lower().strip()) + ".txt" if cand_name else "resume.txt")
+        return fallback_name, raw_text.encode("utf-8", errors="replace")
+
+    return fname, None
 
 
 def _resolve_candidate_raw_text(result, rid):
@@ -996,6 +1047,146 @@ def candidate_profile_dialog(rid, result):
     if result.extra_skills:
         st.markdown("**➕ Additional Skills on Resume**")
         st.markdown("".join(f'<span class="tiq-skill-chip chip-extra">{s}</span>' for s in result.extra_skills[:20]), unsafe_allow_html=True)
+
+    # ----------------------------------------------------------------------
+    # Option to view submitted resume vs parsed resume
+    # ----------------------------------------------------------------------
+    sub_fname, sub_bytes = _get_submitted_resume_bytes(result, rid)
+    sub_ext = sub_fname.split(".")[-1].lower() if sub_fname and "." in sub_fname else "txt"
+    sub_mime = "application/pdf" if sub_ext == "pdf" else (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if sub_ext == "docx" else "text/plain"
+    )
+
+    with st.expander("📑 View Submitted Resume (Original vs. Parsed)", expanded=False):
+        st.caption(
+            "Compare the candidate's original submitted document against the structured data extracted by TalentIQ."
+        )
+
+        cmp_tab1, cmp_tab2 = st.tabs(["⚖️ Side-by-Side Comparison", "📄 Full Original Document"])
+
+        with cmp_tab1:
+            orig_col, parsed_col = st.columns([1.1, 1], gap="medium")
+
+            with orig_col:
+                st.markdown(f"###### 📥 Original Submitted Resume &nbsp;`{sub_fname or 'Document'}`")
+                if sub_bytes and sub_ext == "pdf":
+                    b64_pdf = base64.b64encode(sub_bytes).decode("utf-8")
+                    pdf_iframe = (
+                        f'<iframe src="data:application/pdf;base64,{b64_pdf}#toolbar=0" '
+                        f'width="100%" height="480px" type="application/pdf" '
+                        f'style="border:1px solid #e2e8f0;border-radius:8px;"></iframe>'
+                    )
+                    st.markdown(pdf_iframe, unsafe_allow_html=True)
+                else:
+                    if sub_bytes and sub_ext == "docx":
+                        from src.parser import extract_text_from_docx
+                        try:
+                            display_orig = extract_text_from_docx(sub_bytes)
+                        except Exception:
+                            display_orig = sub_bytes.decode("utf-8", errors="replace")
+                    elif sub_bytes:
+                        display_orig = sub_bytes.decode("utf-8", errors="replace")
+                    else:
+                        display_orig = getattr(result, "raw_text", "") or _resolve_candidate_raw_text(result, rid)
+
+                    display_orig = clean_doubled_text(display_orig)
+                    st.text_area(
+                        "Original Document Text",
+                        value=display_orig,
+                        height=480,
+                        key=f"cmp_orig_text_{key_prefix}",
+                        disabled=True,
+                        label_visibility="collapsed",
+                    )
+
+                if sub_bytes:
+                    st.download_button(
+                        f"⬇️ Download Original ({sub_fname or 'resume.' + sub_ext})",
+                        data=sub_bytes,
+                        file_name=sub_fname or f"{result.candidate_name.replace(' ', '_')}.{sub_ext}",
+                        mime=sub_mime,
+                        key=f"dl_sub_{key_prefix}",
+                    )
+
+            with parsed_col:
+                st.markdown("###### 🤖 Structured Parsed Output")
+                parsed_card = [
+                    f"**👤 Name:** {result.candidate_name}",
+                    f"**📧 Email:** {result.email}",
+                    f"**📞 Phone:** {result.phone}",
+                    f"**🎓 Education:** {result.education}",
+                    f"**⏳ Experience:** {format_experience(result.years_experience, getattr(result, 'experience_months', None))}",
+                ]
+                if result.linkedin_url and result.linkedin_url != "Not detected":
+                    parsed_card.append(f"**🔗 LinkedIn:** [{result.linkedin_url}]({result.linkedin_url})")
+                if result.github_url and result.github_url != "Not detected":
+                    parsed_card.append(f"**🐙 GitHub:** [{result.github_url}]({result.github_url})")
+                if result.portfolio_url and result.portfolio_url != "Not detected":
+                    parsed_card.append(f"**🌐 Portfolio:** [{result.portfolio_url}]({result.portfolio_url})")
+
+                st.markdown(
+                    '<div style="background:rgba(248,250,252,0.8);border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-bottom:12px;font-size:0.88rem;line-height:1.6;">'
+                    + "<br>".join(parsed_card)
+                    + "</div>",
+                    unsafe_allow_html=True,
+                )
+
+                st.markdown("**💼 Detected Work History:**")
+                det_roles = extract_work_periods(getattr(result, "raw_text", "") or _resolve_candidate_raw_text(result, rid))
+                if det_roles:
+                    for dr in det_roles[:5]:
+                        d_m = dr.get("months", 0)
+                        d_str = f" · **{d_m} mo{'s' if d_m != 1 else ''}**" if d_m > 0 else ""
+                        st.markdown(f"- **{dr['period']}**{d_str}")
+                else:
+                    st.caption("No dated employment ranges identified.")
+
+                st.markdown(f"**🛠️ Extracted Skills ({len(result.matched_skills) + len(result.extra_skills)}):**")
+                all_skills_chips = []
+                for s in result.matched_skills:
+                    all_skills_chips.append(f'<span class="tiq-skill-chip chip-match" title="Matched requirement">{s}</span>')
+                for s in result.extra_skills[:15]:
+                    all_skills_chips.append(f'<span class="tiq-skill-chip chip-extra" title="Additional detected skill">{s}</span>')
+                st.markdown("".join(all_skills_chips), unsafe_allow_html=True)
+
+        with cmp_tab2:
+            st.markdown(f"##### Full Submitted Document: `{sub_fname or 'Candidate Resume'}`")
+            if sub_bytes and sub_ext == "pdf":
+                b64_pdf = base64.b64encode(sub_bytes).decode("utf-8")
+                pdf_full = (
+                    f'<iframe src="data:application/pdf;base64,{b64_pdf}#toolbar=1" '
+                    f'width="100%" height="650px" type="application/pdf" '
+                    f'style="border:1px solid #e2e8f0;border-radius:8px;"></iframe>'
+                )
+                st.markdown(pdf_full, unsafe_allow_html=True)
+            else:
+                if sub_bytes and sub_ext == "docx":
+                    from src.parser import extract_text_from_docx
+                    try:
+                        doc_text = extract_text_from_docx(sub_bytes)
+                    except Exception:
+                        doc_text = sub_bytes.decode("utf-8", errors="replace")
+                elif sub_bytes:
+                    doc_text = sub_bytes.decode("utf-8", errors="replace")
+                else:
+                    doc_text = getattr(result, "raw_text", "") or _resolve_candidate_raw_text(result, rid)
+
+                st.text_area(
+                    "Submitted Resume Content",
+                    value=clean_doubled_text(doc_text),
+                    height=500,
+                    key=f"cmp_full_doc_{key_prefix}",
+                    disabled=True,
+                    label_visibility="collapsed",
+                )
+            if sub_bytes:
+                st.download_button(
+                    f"⬇️ Download Submitted File ({sub_fname or 'resume.' + sub_ext})",
+                    data=sub_bytes,
+                    file_name=sub_fname or f"{result.candidate_name.replace(' ', '_')}.{sub_ext}",
+                    mime=sub_mime,
+                    key=f"dl_full_{key_prefix}",
+                )
 
     with st.expander("📄 View raw resume text"):
         text_to_show = getattr(result, "raw_text", "") or ""
