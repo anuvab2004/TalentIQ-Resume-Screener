@@ -63,6 +63,35 @@ class CandidateManagementTests(unittest.TestCase):
             self.assertTrue(success_single)
             self.assertTrue(fake_client.table.called)
 
+    def test_education_btech_not_masters(self):
+        from src.parser import extract_education
+        resume_text = """
+        AHELI BANERJEE
+        banerjeeaheli0511@gmail.com
+        EDUCATION
+        B.TECH IN COMPUTER SCIENCE & ENGINEERING 2023 - 2027
+        ST. THOMAS COLLEGE OF ENGINEERING & TECHNOLOGY, MAULANA ABUL KALAM AZAD UNIVERSITY OF TECHNOLOGY
+        CURRENT CGPA: 8.0
+        HIGHER SECONDARY (WBCHSE)
+        UTTARPARA GIRLS' HIGH SCHOOL
+        PERCENTAGE: 82.4
+        """
+        edu = extract_education(resume_text)
+        self.assertEqual(edu, "Bachelor's Degree")
+
+    def test_education_server_master_not_masters(self):
+        from src.parser import extract_education
+        resume_text = """
+        VIKRAM RAO
+        vikram.rao@sampledata.dev
+        EXPERIENCE
+        Configured NIM Master server and clients for production workloads.
+        EDUCATION
+        Education B .S : Computer Science
+        """
+        edu = extract_education(resume_text)
+        self.assertEqual(edu, "Bachelor's Degree")
+
 
 if __name__ == "__main__":
     unittest.main()

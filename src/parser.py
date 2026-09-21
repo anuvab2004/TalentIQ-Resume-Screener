@@ -338,11 +338,86 @@ def extract_years_experience(text: str) -> float:
     return 0.0
 
 
+def extract_education_section(text: str) -> str:
+    """Isolate the Education / Academic section from the document to avoid
+    false positives in project names, technical skills, or email domains."""
+    header_pattern = re.compile(
+        r"(?:^|\n|\r)\s*(?:education(?:\s+and\s+training|\s+background|\s+qualifications|\s+details)?|academics?|academic\s+background|qualifications?)\b[:\s]*(.*)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    m = header_pattern.search(text)
+    if not m:
+        return ""
+    remainder = m.group(1)
+    end_pattern = re.compile(
+        r"(?:\n|\r)\s*(?:work\s+experience|professional\s+experience|experience|employment|work\s+history|technical\s+skills|key\s+skills|skills|projects?|certifications?|publications?|achievements?|awards?|hobbies|interests|summary|objective)\b",
+        re.IGNORECASE,
+    )
+    end_m = end_pattern.search(remainder)
+    if end_m:
+        return remainder[:end_m.start()]
+    return remainder[:1500]
+
+
 def extract_education(text: str) -> str:
-    low = text.lower()
-    for key, label in EDUCATION_LEVELS:
-        if key in low:
-            return label
+    """Extract highest education level using regex word boundaries and section isolation.
+    Prevents false positives (e.g., 'gmail' matching 'ma', 'master server' matching 'master')."""
+    edu_section = extract_education_section(text)
+    targets = [edu_section, text] if edu_section and len(edu_section.strip()) > 5 else [text]
+
+    for scope_idx, scope in enumerate(targets):
+        is_edu_section = (scope_idx == 0 and bool(edu_section) and len(edu_section.strip()) > 5)
+        low = scope.lower()
+
+        # 1. PhD / Doctorate
+        if re.search(r"\b(?:ph\.?\s*d\.?|doctorate|doctor\s+of\s+philosophy)\b", low):
+            return "PhD / Doctorate"
+
+        # 2. Master's Degree
+        master_matches = list(re.finditer(r"\bmaster(?:['’]s)?\b", low))
+        has_real_master = False
+        for mm in master_matches:
+            start = max(0, mm.start() - 25)
+            end = min(len(low), mm.end() + 25)
+            snippet = low[start:end]
+            if re.search(r"\b(?:scrum|server|node|slave|nim|media|web|task)\s+master\b", snippet) or \
+               re.search(r"\bmaster\s+(?:server|node|slave|branch|key)\b", snippet):
+                continue
+            has_real_master = True
+            break
+
+        if has_real_master:
+            return "Master's Degree"
+
+        if re.search(r"\b(?:m\.?\s*tech|mba|mca|m\.?\s*sc\.?|m\.?\s*phil\.?|post\s*graduate)\b", low):
+            return "Master's Degree"
+
+        # M.S. with degree context
+        if re.search(r"\b(?:m\.s\.|m\s*\.\s*s\.|master\s+of\s+science)\b", low):
+            return "Master's Degree"
+        if is_edu_section and re.search(r"\bms\s*(?::|\bin\b|\bof\b|degree)", low):
+            return "Master's Degree"
+
+        # 3. Bachelor's Degree
+        if re.search(r"\b(?:bachelor(?:['’]s)?|b\.?\s*tech|b\.?\s*e\.?|b\.?\s*sc\.?|bca|bba|b\.?\s*com|undergraduate)\b", low):
+            return "Bachelor's Degree"
+        if re.search(r"\b(?:b\.s\.|b\s*\.\s*s\.|b\s*\.\s*s\b|bachelor\s+of\s+science)\b", low):
+            return "Bachelor's Degree"
+        if is_edu_section and re.search(r"\bbs\b", low):
+            return "Bachelor's Degree"
+
+        # 4. Associate Degree
+        if re.search(r"\bassociate(?:['’]s)?(?:\s+degree|\s+of\s+[a-z]+)?\b", low):
+            return "Associate Degree"
+
+        # 5. Diploma
+        if re.search(r"\b(?:diploma|polytechnic)\b", low):
+            return "Diploma"
+
+        # 6. High School
+        if re.search(r"\b(?:high\s+school|higher\s+secondary|secondary\s+school|wbchse|cbse|icse)\b", low):
+            return "High School"
+
     return "Not detected"
 
 
