@@ -22,7 +22,21 @@ from src.matcher import (
     embeddings_available,
     WEIGHTS,
 )
-from src.parser import extract_social_link_labels, extract_social_links, parse_document, parse_job_description, clean_doubled_text
+from src.parser import extract_social_link_labels, extract_social_links, parse_document, parse_job_description
+try:
+    from src.parser import clean_doubled_text
+except (ImportError, AttributeError):
+    def clean_doubled_text(text: str) -> str:
+        if not text:
+            return ""
+        def _fix_word(match):
+            w = match.group(0)
+            if len(w) >= 6 and len(w) % 2 == 0:
+                if all(w[i].lower() == w[i + 1].lower() for i in range(0, len(w), 2)):
+                    return "".join(w[i] for i in range(0, len(w), 2))
+            return w
+        import re
+        return re.sub(r"\b[A-Za-z]{6,}\b", _fix_word, text)
 from src.sample_data import list_sample_resumes, load_sample_resume_bytes, list_sample_jds
 
 st.set_page_config(
