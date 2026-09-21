@@ -835,6 +835,54 @@ def clear_requisition_candidates(rid: str, user_id: str = None):
         logs.pop(k, None)
 
 
+def _render_pdf_document(pdf_bytes: bytes, max_pages: int = 5, key_prefix: str = "pdf"):
+    """Render PDF pages directly as images or text so web browsers never block it with iframe restrictions."""
+    if not pdf_bytes:
+        st.info("No PDF data available.")
+        return
+
+    rendered_images = []
+    # 1. Try rendering with pypdfium2 (high fidelity rasterization)
+    try:
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(pdf_bytes)
+        num_pages = min(len(doc), max_pages)
+        for i in range(num_pages):
+            page = doc[i]
+            # scale=1.5 gives crisp text readability while keeping memory reasonable
+            image = page.render(scale=1.5).to_pil()
+            rendered_images.append(image)
+    except Exception:
+        # 2. Fallback to pdfplumber if pypdfium2 fails
+        try:
+            import pdfplumber
+            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                num_pages = min(len(pdf.pages), max_pages)
+                for i in range(num_pages):
+                    page_img = pdf.pages[i].to_image(resolution=120).original
+                    rendered_images.append(page_img)
+        except Exception:
+            pass
+
+    if rendered_images:
+        for idx, img in enumerate(rendered_images):
+            if len(rendered_images) > 1:
+                st.caption(f"Page {idx + 1} of {len(rendered_images)}")
+            st.image(img, use_container_width=True)
+    else:
+        # Fallback to extracting text directly
+        try:
+            import pdfplumber
+            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                full_text = "\n\n".join(p.extract_text() or "" for p in pdf.pages)
+            if full_text.strip():
+                st.text_area("Extracted Resume Content", value=full_text, height=450, disabled=True, key=f"pdf_txt_fb_{key_prefix}")
+            else:
+                st.warning("Could not render PDF preview. Please download the file below to view.")
+        except Exception:
+            st.warning("Could not render PDF preview. Please download the file below to view.")
+
+
 def _get_submitted_resume_bytes(result, rid):
     """Retrieve original file bytes for the submitted resume (memory cache, sample dir, or Supabase)."""
     fname = getattr(result, "filename", "") or ""
@@ -1069,13 +1117,7 @@ def candidate_profile_dialog(rid, result):
             with orig_col:
                 st.markdown(f"###### 📥 Original Submitted Resume &nbsp;`{sub_fname or 'Document'}`")
                 if sub_bytes and sub_ext == "pdf":
-                    b64_pdf = base64.b64encode(sub_bytes).decode("utf-8")
-                    pdf_iframe = (
-                        f'<iframe src="data:application/pdf;base64,{b64_pdf}#toolbar=0" '
-                        f'width="100%" height="480px" type="application/pdf" '
-                        f'style="border:1px solid #e2e8f0;border-radius:8px;"></iframe>'
-                    )
-                    st.markdown(pdf_iframe, unsafe_allow_html=True)
+                    _render_pdf_document(sub_bytes, max_pages=3, key_prefix=f"side_{key_prefix}")
                 else:
                     if sub_bytes and sub_ext == "docx":
                         from src.parser import extract_text_from_docx
@@ -1150,13 +1192,7 @@ def candidate_profile_dialog(rid, result):
         with cmp_tab2:
             st.markdown(f"##### Full Submitted Document: `{sub_fname or 'Candidate Resume'}`")
             if sub_bytes and sub_ext == "pdf":
-                b64_pdf = base64.b64encode(sub_bytes).decode("utf-8")
-                pdf_full = (
-                    f'<iframe src="data:application/pdf;base64,{b64_pdf}#toolbar=1" '
-                    f'width="100%" height="650px" type="application/pdf" '
-                    f'style="border:1px solid #e2e8f0;border-radius:8px;"></iframe>'
-                )
-                st.markdown(pdf_full, unsafe_allow_html=True)
+                _render_pdf_document(sub_bytes, max_pages=8, key_prefix=f"full_{key_prefix}")
             else:
                 if sub_bytes and sub_ext == "docx":
                     from src.parser import extract_text_from_docx
