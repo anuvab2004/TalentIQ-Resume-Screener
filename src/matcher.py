@@ -125,14 +125,35 @@ def preload_embedding_model():
     return _get_embedding_model()
 
 
-def _chunk_text(text: str, max_words: int = 200) -> list:
-    """Sentence-transformer models have a limited context window; split long
-    resumes/JDs into word chunks and mean-pool their embeddings rather than
-    silently truncating and losing the back half of the document."""
-    words = text.split()
-    if not words:
-        return [""]
-    return [" ".join(words[i:i + max_words]) for i in range(0, len(words), max_words)]
+def _chunk_text(text: str, max_words: int = 180) -> list:
+    """Split text into semantically cohesive, section-aware chunks that fit
+    comfortably within sentence-transformer token limits (256 tokens).
+    Separates by structural sections if available, then splits long sections
+    into max_words chunks.
+    """
+    from .parser import _split_sections
+    
+    chunks = []
+    sections = _split_sections(text)
+    
+    for kind, lines in sections:
+        sec_text = " ".join(lines).strip()
+        if not sec_text:
+            continue
+        words = sec_text.split()
+        if len(words) <= max_words:
+            chunks.append(sec_text)
+        else:
+            for i in range(0, len(words), max_words):
+                chunks.append(" ".join(words[i:i + max_words]))
+                
+    if not chunks:
+        words = text.split()
+        if not words:
+            return [""]
+        return [" ".join(words[i:i + max_words]) for i in range(0, len(words), max_words)]
+        
+    return chunks
 
 
 def _embed_mean(text: str, model):
@@ -191,13 +212,19 @@ def _embed_documents_batch(texts: list, model, batch_size: int = 32):
 
 def _semantic_relevance_tfidf(resume_text: str, jd_text: str) -> float:
     """TF-IDF cosine similarity between full resume text and the JD text.
-    This is the 'understands skills semantically' layer — it still rewards
-    close-but-not-identical phrasing, unlike pure keyword matching."""
+    Uses n-grams (1, 3) to capture multi-word skills (e.g. 'machine learning',
+    'a/b testing') and sublinear term frequency to avoid rewarding keyword stuffing.
+    """
     docs = [resume_text or "", jd_text or ""]
     if not docs[0].strip() or not docs[1].strip():
         return 0.0
     try:
-        vectorizer = TfidfVectorizer(stop_words="english", max_features=5000)
+        vectorizer = TfidfVectorizer(
+            stop_words="english",
+            ngram_range=(1, 3),
+            sublinear_tf=True,
+            max_features=10000,
+        )
         tfidf = vectorizer.fit_transform(docs)
         sim = cosine_similarity(tfidf[0], tfidf[1])[0][0]
         return round(float(sim) * 100, 1)
@@ -206,22 +233,27 @@ def _semantic_relevance_tfidf(resume_text: str, jd_text: str) -> float:
 
 
 def _semantic_relevance_embeddings(resume_text: str, jd_text: str) -> float:
-    """Meaning-based similarity via sentence-transformer embeddings. Falls
-    back to TF-IDF on any runtime error (e.g. first-use model download
-    failed because of no network) so a screening run never hard-crashes."""
+    """Meaning-based similarity via sentence-transformer embeddings combined
+    with n-gram TF-IDF for accurate semantic matching + paraphrase detection.
+    Falls back to TF-IDF if model is unavailable.
+    """
     if not (resume_text or "").strip() or not (jd_text or "").strip():
         return 0.0
+    tfidf_score = _semantic_relevance_tfidf(resume_text, jd_text)
     try:
         import numpy as np
         model = _get_embedding_model()
         if model is None:
-            return _semantic_relevance_tfidf(resume_text, jd_text)
+            return tfidf_score
         r_vec = _embed_mean(resume_text, model)
         j_vec = _embed_mean(jd_text, model)
         sim = float(np.dot(r_vec, j_vec) / (np.linalg.norm(r_vec) * np.linalg.norm(j_vec) + 1e-9))
-        return round(max(sim, 0.0) * 100, 1)
+        emb_score = round(max(sim, 0.0) * 100, 1)
+        # Blend: TF-IDF n-grams (60% weight of semantic signal) + MiniLM (40% weight for paraphrase/tie-breaking)
+        blended = round(0.60 * tfidf_score + 0.40 * emb_score, 1)
+        return blended
     except Exception:
-        return _semantic_relevance_tfidf(resume_text, jd_text)
+        return tfidf_score
 
 
 def semantic_relevance(resume_text: str, jd_text: str, backend: str = "auto") -> tuple:
@@ -354,7 +386,24 @@ def _status_from_score(score: float) -> str:
     return "Low Match"
 
 
-def _build_rationale(candidate_name, matched, missing, factors, status, experience_months: int = 0) -> str:
+def _apply_required_skill_gate(raw_score: float, missing_req: list) -> tuple:
+    """Hard pass/fail gating based on required skills:
+    - If all required skills are matched -> eligible for full unconstrained score.
+    - If missing 1 required skill -> capped at 75%.
+    - If missing 2+ required skills -> capped at 50%.
+    Returns (gated_score, cap_applied_message_or_None).
+    """
+    count_missing = len(missing_req)
+    if count_missing >= 2:
+        if raw_score > 50.0:
+            return 50.0, f"Score capped at 50% due to missing multiple required skills ({', '.join(missing_req[:3])})."
+    elif count_missing == 1:
+        if raw_score > 75.0:
+            return 75.0, f"Score capped at 75% due to missing required skill ({missing_req[0]})."
+    return raw_score, None
+
+
+def _build_rationale(candidate_name, matched, missing, factors, status, experience_months: int = 0, gate_note: str = None) -> str:
     top_matches = ", ".join(matched[:4]) if matched else "no directly overlapping skills"
     lines = [
         f"{status} — driven primarily by "
@@ -365,6 +414,8 @@ def _build_rationale(candidate_name, matched, missing, factors, status, experien
         )
         + "."
     ]
+    if gate_note:
+        lines.append(gate_note)
     if matched:
         lines.append(f"Matched on: {top_matches}.")
     if missing:
@@ -384,9 +435,10 @@ def score_candidate(parsed_resume, parsed_jd, filename="", semantic_backend="aut
     weights = weights or WEIGHTS
     semantic, engine_used = semantic_relevance(parsed_resume.raw_text, parsed_jd["raw_text"], backend=semantic_backend)
     pref_skills = parsed_jd.get("preferred_skills", [])
+    req_skills = parsed_jd.get("required_skills", [])
     skill_score, matched, missing, extra, req_match_sc, pref_match_sc = _skill_alignment(
         parsed_resume.skills,
-        parsed_jd.get("required_skills", []),
+        req_skills,
         preferred_skills=pref_skills,
         resume_text=parsed_resume.raw_text,
     )
@@ -409,11 +461,20 @@ def score_candidate(parsed_resume, parsed_jd, filename="", semantic_backend="aut
         "preferred_match_score": pref_match_sc,
     }
 
-    overall = round(
+    raw_overall = round(
         sum(factors[k] * weights[k] for k in WEIGHTS), 1
     )
+    missing_required = [s for s in req_skills if s.lower() not in {sk.lower() for sk in matched}]
+    overall, gate_note = _apply_required_skill_gate(raw_overall, missing_required)
+    if gate_note:
+        factors["gate_cap_applied"] = gate_note
+    elif len(missing_required) == 0 and len(req_skills) > 0:
+        factors["gate_status"] = "All required skills met"
+    elif len(missing_required) > 0:
+        # Candidate missed required skill(s), record note
+        factors["gate_cap_applied"] = f"Candidate missing required skills ({', '.join(missing_required[:3])}); raw score {raw_overall}% was under cap threshold."
     status = _status_from_score(overall)
-    rationale = _build_rationale(parsed_resume.name, matched, missing, factors, status, experience_months=exp_months)
+    rationale = _build_rationale(parsed_resume.name, matched, missing, factors, status, experience_months=exp_months, gate_note=gate_note)
 
     # The fairness audit always uses TF-IDF regardless of the chosen semantic
     # engine: it's a fast, stable sanity check on identity-field influence,
@@ -575,13 +636,18 @@ def score_candidates_batch(
         # -----------------------------------------------------
         # Overall score
         # -----------------------------------------------------
-        overall = round(
+        raw_overall = round(
             sum(
                 factors[k] * weights[k]
                 for k in WEIGHTS
             ),
             1,
         )
+        batch_req_skills = parsed_jd.get("required_skills", [])
+        missing_required = [s for s in batch_req_skills if s.lower() not in {sk.lower() for sk in matched}]
+        overall, gate_note = _apply_required_skill_gate(raw_overall, missing_required)
+        if gate_note:
+            factors["gate_cap_applied"] = gate_note
 
         status = _status_from_score(overall)
 
@@ -592,6 +658,7 @@ def score_candidates_batch(
             factors,
             status,
             experience_months=batch_exp_months,
+            gate_note=gate_note,
         )
 
         # -----------------------------------------------------
@@ -669,10 +736,21 @@ def rank_candidates(results: list, weights=None) -> list:
     for r in results:
         # Keep the original semantic relevance score.
         # Do NOT rescale it based on the other candidates.
-        r.overall_score = round(
+        raw_overall = round(
             sum(r.factors[k] * weights[k] for k in WEIGHTS),
             1
         )
+        gate_note = r.factors.get("gate_cap_applied")
+        if "gate_cap_applied" in r.factors:
+            # Re-evaluate cap against new weights if gate was present
+            if "50%" in gate_note:
+                r.overall_score = min(raw_overall, 50.0)
+            elif "75%" in gate_note:
+                r.overall_score = min(raw_overall, 75.0)
+            else:
+                r.overall_score = raw_overall
+        else:
+            r.overall_score = raw_overall
 
         r.status = _status_from_score(r.overall_score)
 
@@ -681,7 +759,9 @@ def rank_candidates(results: list, weights=None) -> list:
             r.matched_skills,
             r.missing_skills,
             r.factors,
-            r.status
+            r.status,
+            experience_months=getattr(r, "experience_months", 0),
+            gate_note=gate_note,
         )
 
     results.sort(key=lambda r: -r.overall_score)

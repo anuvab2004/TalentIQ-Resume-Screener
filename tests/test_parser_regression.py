@@ -265,6 +265,61 @@ class ParserRegressionSuite(unittest.TestCase):
         self.assertEqual(run2.years_experience, run3.years_experience)
         self.assertEqual(run1.parse_confidence, run3.parse_confidence)
 
+    def test_14_ngram_tfidf_accuracy(self):
+        from src.matcher import _semantic_relevance_tfidf
+        # N-grams (1, 3) must match multi-word phrases even without subtoken exact matches
+        jd = "Seeking candidate skilled in Machine Learning and A/B Testing pipelines."
+        resume_match = "Experienced engineer working on Machine Learning and A/B Testing projects."
+        resume_mismatch = "Experienced engineer working on cooking and playing football."
+        
+        sim_match = _semantic_relevance_tfidf(resume_match, jd)
+        sim_mismatch = _semantic_relevance_tfidf(resume_mismatch, jd)
+        self.assertGreater(sim_match, 15.0)
+        self.assertEqual(sim_mismatch, 0.0)
+
+    def test_15_required_skills_hard_gate(self):
+        from src.matcher import _apply_required_skill_gate
+        # Hard gate pass/fail:
+        # Missing 1 required skill -> score capped at 75%
+        gated_1, note_1 = _apply_required_skill_gate(88.0, ["Kubernetes"])
+        self.assertEqual(gated_1, 75.0)
+        self.assertIn("Score capped at 75%", note_1)
+
+        # Missing 2+ required skills -> score capped at 50%
+        gated_2, note_2 = _apply_required_skill_gate(88.0, ["Kubernetes", "PyTorch"])
+        self.assertEqual(gated_2, 50.0)
+        self.assertIn("Score capped at 50%", note_2)
+
+        # Candidate with score already under cap retains score
+        gated_3, note_3 = _apply_required_skill_gate(42.0, ["Kubernetes"])
+        self.assertEqual(gated_3, 42.0)
+        self.assertIsNone(note_3)
+
+        # End-to-end candidate missing required skill
+        parsed_jd = {
+            "title": "Staff ML Engineer",
+            "required_skills": ["Python", "PyTorch", "Kubernetes"],
+            "preferred_skills": ["Docker"],
+            "required_education": "Bachelor's Degree",
+            "min_years": 2.0,
+            "raw_text": "Staff ML Engineer Python PyTorch Kubernetes Docker Senior ML Engineer 2 years exp",
+        }
+        cv_miss_1 = """
+        Alice Senior
+        alice@example.com
+        Experience
+        Senior ML Engineer, AI Corp   Jan 2014 - Dec 2024
+        Education
+        Master of Science, Stanford   2010 - 2014
+        Skills: Python, PyTorch, Docker, Machine Learning, Deep Learning
+        """
+        doc1 = parse_document("alice.txt", cv_miss_1.encode("utf-8"))
+        res1 = score_candidate(doc1, parsed_jd)
+        self.assertLessEqual(res1.overall_score, 75.0)
+        self.assertIn("gate_cap_applied", res1.factors)
+        self.assertIn("Kubernetes", res1.factors["gate_cap_applied"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
