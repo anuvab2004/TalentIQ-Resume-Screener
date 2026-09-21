@@ -265,6 +265,7 @@ def fetch_results(req_id: str, user_id: Optional[str] = None) -> list:
                 phone=cphone or "Not detected",
                 education=row.get("education") or "Not detected",
                 years_experience=float(row.get("years_experience") or 0),
+                experience_months=int(row.get("experience_months") or factors.get("experience_months") or round(float(row.get("years_experience") or 0) * 12)),
                 fairness_audit=row.get("fairness_audit") or {},
                 semantic_engine=row.get("semantic_engine") or "tfidf",
                 raw_text=raw_text,
@@ -364,6 +365,8 @@ def save_results(req_id: str, results: list, existing_actions: Optional[Dict] = 
             factors_dict = dict(r.factors or {})
             if getattr(r, "raw_text", None):
                 factors_dict["raw_text"] = r.raw_text
+            if getattr(r, "experience_months", None) is not None:
+                factors_dict["experience_months"] = r.experience_months
 
             row: Dict[str, Any] = {
                 "req_id": db_id,

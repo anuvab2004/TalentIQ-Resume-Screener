@@ -251,11 +251,18 @@ def _skill_alignment(candidate_skills, required_skills):
     return score, matched, missing, extra
 
 
-def _experience_evidence(candidate_years: float, min_years: float) -> float:
-    if min_years <= 0:
-        # JD didn't specify a requirement -> score on an absolute curve.
-        return round(min(candidate_years / 8.0, 1.0) * 100, 1)
-    return round(min(candidate_years / min_years, 1.0) * 100, 1)
+def _experience_evidence(candidate_years: float, min_years: float, is_internship: bool = False, candidate_months: int = 0) -> float:
+    cand_m = candidate_months if candidate_months > 0 else round(candidate_years * 12)
+    effective_years = max(candidate_years, cand_m / 12.0)
+    if min_years > 0:
+        return round(min(effective_years / min_years, 1.0) * 100, 1)
+    if is_internship:
+        if cand_m >= 3:
+            return 100.0
+        elif cand_m > 0:
+            return round((cand_m / 3.0) * 100, 1)
+        return 75.0
+    return round(min(effective_years / 8.0, 1.0) * 100, 1)
 
 
 def _education_evidence(candidate_education: str, required_education: str) -> float:
@@ -277,7 +284,7 @@ def _status_from_score(score: float) -> str:
     return "Low Match"
 
 
-def _build_rationale(candidate_name, matched, missing, factors, status) -> str:
+def _build_rationale(candidate_name, matched, missing, factors, status, experience_months: int = 0) -> str:
     top_matches = ", ".join(matched[:4]) if matched else "no directly overlapping skills"
     lines = [
         f"{status} — driven primarily by "
@@ -292,6 +299,14 @@ def _build_rationale(candidate_name, matched, missing, factors, status) -> str:
         lines.append(f"Matched on: {top_matches}.")
     if missing:
         lines.append(f"Gaps to probe in screening: {', '.join(missing[:4])}.")
+    if experience_months > 0:
+        if experience_months < 12:
+            lines.append(f"Verified experience/internship: {experience_months} month{'s' if experience_months != 1 else ''}.")
+        else:
+            y = experience_months // 12
+            rem = experience_months % 12
+            exp_str = f"{y} yr{'s' if y != 1 else ''}" + (f" {rem} mo{'s' if rem != 1 else ''}" if rem else "")
+            lines.append(f"Verified experience: {exp_str}.")
     return " ".join(lines)
 
 
@@ -301,7 +316,14 @@ def score_candidate(parsed_resume, parsed_jd, filename="", semantic_backend="aut
     skill_score, matched, missing, extra = _skill_alignment(
         parsed_resume.skills, parsed_jd["required_skills"]
     )
-    exp_score = _experience_evidence(parsed_resume.years_experience, parsed_jd["min_years"])
+    exp_months = getattr(parsed_resume, "experience_months", 0)
+    is_intern = parsed_jd.get("is_internship", False)
+    exp_score = _experience_evidence(
+        parsed_resume.years_experience,
+        parsed_jd.get("min_years", 0.0),
+        is_internship=is_intern,
+        candidate_months=exp_months,
+    )
     edu_score = _education_evidence(parsed_resume.education, parsed_jd["required_education"])
 
     factors = {
@@ -315,7 +337,7 @@ def score_candidate(parsed_resume, parsed_jd, filename="", semantic_backend="aut
         sum(factors[k] * weights[k] for k in WEIGHTS), 1
     )
     status = _status_from_score(overall)
-    rationale = _build_rationale(parsed_resume.name, matched, missing, factors, status)
+    rationale = _build_rationale(parsed_resume.name, matched, missing, factors, status, experience_months=exp_months)
 
     # The fairness audit always uses TF-IDF regardless of the chosen semantic
     # engine: it's a fast, stable sanity check on identity-field influence,
@@ -445,9 +467,13 @@ def score_candidates_batch(
         # -----------------------------------------------------
         # Experience
         # -----------------------------------------------------
+        batch_exp_months = getattr(parsed_resume, "experience_months", 0)
+        batch_is_intern = parsed_jd.get("is_internship", False)
         exp_score = _experience_evidence(
             parsed_resume.years_experience,
-            parsed_jd["min_years"],
+            parsed_jd.get("min_years", 0.0),
+            is_internship=batch_is_intern,
+            candidate_months=batch_exp_months,
         )
 
         # -----------------------------------------------------
@@ -484,6 +510,7 @@ def score_candidates_batch(
             missing,
             factors,
             status,
+            experience_months=batch_exp_months,
         )
 
         # -----------------------------------------------------

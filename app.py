@@ -22,7 +22,7 @@ from src.matcher import (
     embeddings_available,
     WEIGHTS,
 )
-from src.parser import extract_social_link_labels, extract_social_links, extract_work_periods, format_experience, format_years, parse_document, parse_job_description
+from src.parser import extract_experience_months, extract_social_link_labels, extract_social_links, extract_work_periods, format_experience, format_years, parse_document, parse_job_description
 try:
     from src.parser import clean_doubled_text
 except (ImportError, AttributeError):
@@ -831,7 +831,9 @@ def clear_requisition_candidates(rid: str, user_id: str = None):
 
 
 def _resolve_candidate_raw_text(result, rid):
-    """Fallback to sample resumes or Supabase storage if raw_text is missing in memory."""
+    """Fallback to factors, sample resumes or Supabase storage if raw_text is missing in memory."""
+    if isinstance(getattr(result, "factors", None), dict) and result.factors.get("raw_text"):
+        return result.factors["raw_text"]
     fname = getattr(result, "filename", "")
     if not fname:
         return ""
@@ -931,9 +933,15 @@ def candidate_profile_dialog(rid, result):
         st.write(f"{label} — **{val:.0f}%**")
         st.progress(min(max(val / 100, 0), 1.0))
 
+    raw_resume_text = getattr(result, "raw_text", "") or _resolve_candidate_raw_text(result, rid)
+    if getattr(result, "experience_months", 0) <= 0 and raw_resume_text:
+        calc_m = extract_experience_months(raw_resume_text)
+        if calc_m > 0:
+            result.experience_months = calc_m
+            result.years_experience = round(calc_m / 12, 1)
+
     st.caption(f"Education: {result.education}  ·  Experience: {format_experience(result.years_experience, getattr(result, 'experience_months', None))}")
 
-    raw_resume_text = getattr(result, "raw_text", "") or _resolve_candidate_raw_text(result, rid)
     detected_periods = extract_work_periods(raw_resume_text)
     if detected_periods:
         st.markdown("##### 💼 Experience & Internships")
@@ -1101,7 +1109,13 @@ def build_profile_text(result):
                 except (ValueError, TypeError):
                     pass
 
-    raw_resume_text = getattr(result, "raw_text", "")
+    raw_resume_text = getattr(result, "raw_text", "") or (result.factors.get("raw_text", "") if isinstance(getattr(result, "factors", None), dict) else "")
+    if getattr(result, "experience_months", 0) <= 0 and raw_resume_text:
+        calc_m = extract_experience_months(raw_resume_text)
+        if calc_m > 0:
+            result.experience_months = calc_m
+            result.years_experience = round(calc_m / 12, 1)
+
     detected_periods = extract_work_periods(raw_resume_text)
     if detected_periods:
         lines.append("")
@@ -1210,6 +1224,15 @@ def page_candidates():
             if st.button("Confirm: Clear Pool", key=f"clear_cand_page_{rid}", type="primary"):
                 clear_requisition_candidates(rid, user_id=current_user_id())
                 st.rerun()
+    for r in results:
+        if getattr(r, "experience_months", 0) <= 0:
+            r_text = getattr(r, "raw_text", "") or _resolve_candidate_raw_text(r, rid)
+            if r_text:
+                calc_m = extract_experience_months(r_text)
+                if calc_m > 0:
+                    r.experience_months = calc_m
+                    r.years_experience = round(calc_m / 12, 1)
+
     tabs = st.tabs(["All", "Strong Match", "Good Match", "Review", "Low Match", "Shortlisted"])
     tab_filters = ["All", "Strong Match", "Good Match", "Review", "Low Match", "Shortlisted"]
 

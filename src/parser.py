@@ -607,15 +607,29 @@ def _work_periods(text: str, now):
     positions = [pos for pos, _ in markers]
     periods = []
     for m, parts in _find_ranges(text):
-        # (a) never inside Education / Projects / Skills / Certifications / Other
-        if _section_kind_at(markers, positions, m.start()) in ("education", "other"):
-            continue
-
         ls, le = _line_bounds(text, m.start(), m.end())
         before = _cut_before(text[max(ls, m.start() - 120):m.start()])
         after = _cut_after(text[m.end():min(le, m.end() + 90)])
         own = f"{before} {after}"
         own_has_title = bool(_WORK_TITLE_RE.search(own))
+
+        sec_kind = _section_kind_at(markers, positions, m.start())
+        if sec_kind in ("education", "other"):
+            context_line = own
+            if le - ls <= 140:
+                context_line += " " + " ".join(_adjacent_lines(text, ls, le))
+            has_title = own_has_title or bool(_WORK_TITLE_RE.search(context_line))
+            has_employer_or_sep = bool(
+                _EMPLOYER_RE.search(context_line)
+                or " - " in context_line
+                or " at " in context_line
+                or " @ " in context_line
+                or "|" in context_line
+                or "(" in context_line
+            )
+            is_real_role = has_title and has_employer_or_sep and not _DEGREE_RE.search(own)
+            if not is_real_role:
+                continue
 
         # (b) never next to a degree / grade / unpaid role, or institution without job title
         if _DEGREE_RE.search(own) or _UNPAID_ROLE_RE.search(own):
@@ -1000,10 +1014,16 @@ def parse_job_description(jd_text: str, min_years_override=None, extra_skills: l
     skills = extract_skills(jd_text, extra_skills=extra_skills)
     years_match = YEARS_EXP_RE.search(jd_text)
     min_years = float(years_match.group(1)) if years_match else (min_years_override or 0.0)
+    if not min_years:
+        months_match = MONTHS_EXP_RE.search(jd_text) or INTERNSHIP_DURATION_RE.search(jd_text)
+        if months_match:
+            min_years = round(int(months_match.group(1)) / 12, 2)
     education = extract_education(jd_text, mode="lowest")
+    is_internship = bool(re.search(r"\b(?:intern(?:s|ship|ships)?|trainee)\b", jd_text, re.IGNORECASE))
     return {
         "raw_text": jd_text,
         "required_skills": skills,
         "min_years": min_years,
         "required_education": education,
+        "is_internship": is_internship,
     }

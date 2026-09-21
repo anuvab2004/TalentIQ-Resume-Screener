@@ -284,6 +284,36 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(extract_experience_months(t4, now=NOW), 3)
         self.assertEqual(format_experience(extract_years_experience(t4, now=NOW), 3), "3 months")
 
+    def test_internship_under_projects_and_other_sections(self):
+        # User resume snippet under PROJECTS heading
+        snippet = """PROJECTS
+Full-Stack Developer Intern - KreupAl Technologies LLC May 2026 - August 2026 | Remote
+• Helped develop tools to track HR compliance and company rules.
+• Worked on executive dashboards for business reporting and data analysis.
+• Collaborated well with the team and actively participated in daily standups.
+Product & Web Developer Intern - Baha (studiobaha.com)
+• Built and designed the company's Shopify website, customizing themes using Liquid templates.
+• Added products to the website and managed the company's social media accounts.
+• Researched competitors and the market to help the business grow.
+"""
+        periods = extract_work_periods(snippet, now=NOW)
+        months = extract_experience_months(snippet, now=NOW)
+        self.assertEqual(months, 4)
+        self.assertEqual(format_experience(extract_years_experience(snippet, now=NOW), months), "4 months")
+        self.assertEqual(format_experience(extract_years_experience(snippet, now=NOW), months, compact=True), "4 mos")
+
+        # Must detect the dated internship period and the undated role
+        period_names = [p["period"] for p in periods]
+        self.assertIn("May 2026 - August 2026", period_names)
+        self.assertTrue(any("Baha" in p["context"] for p in periods))
+
+    def test_job_description_with_internship_months(self):
+        from src.parser import parse_job_description
+        jd = parse_job_description("Software Engineering Intern: Requires 3 months internship experience in Python and React.")
+        self.assertEqual(jd["min_years"], 0.25)
+        self.assertTrue(jd["is_internship"])
+
+
 
 if __name__ == "__main__":
     unittest.main()
