@@ -26,7 +26,7 @@ URL_RE = re.compile(
 # so it doesn't grab pieces of longer numeric strings (IDs, years, etc.)
 PHONE_RE = re.compile(
     r"(?<![\d/])"
-    r"(?:\+\d{1,3}[\s.-]?)?"
+    r"(?:\(\+?\d{1,4}\)[\s.-]?|\+\d{1,3}[\s.-]?)?"
     r"(?:\(\d{2,4}\)[\s.-]?)?"
     r"\d{3,5}[\s.-]?\d{3,4}(?:[\s.-]?\d{2,4})?"
     r"(?![\d/])"
@@ -363,18 +363,34 @@ def extract_skills(text: str, extra_skills: list = None) -> list:
     return sorted(found)
 
 
+def extract_email(text: str) -> str:
+    """Robust email extractor handling standard formats, mailto: URIs,
+    non-breaking spaces, and spaced-out PDF text artifacts."""
+    cleaned = text.replace('\xa0', ' ').replace('\u200b', '').replace('\ufeff', '')
+    m = EMAIL_RE.search(cleaned)
+    if m:
+        return m.group(0).strip()
+    mailto_m = re.search(r"mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", cleaned, re.IGNORECASE)
+    if mailto_m:
+        return mailto_m.group(1).strip()
+    spaced_m = re.search(r"([a-zA-Z0-9._%+\-]+)\s*@\s*([a-zA-Z0-9.\-]+)\s*\.\s*([a-zA-Z]{2,})", cleaned)
+    if spaced_m:
+        return f"{spaced_m.group(1)}@{spaced_m.group(2)}.{spaced_m.group(3)}".strip()
+    return "Not detected"
+
+
 def parse_document(filename: str, file_bytes: bytes, extra_skills: list = None) -> ParsedDocument:
     text = extract_text(filename, file_bytes)
     fallback_name = re.sub(r"\.[a-zA-Z0-9]+$", "", filename).replace("_", " ").replace("-", " ").title()
 
-    email_match = EMAIL_RE.search(text)
+    email = extract_email(text)
     phone = extract_phone(text)
     social_links = extract_social_links(text)
 
     return ParsedDocument(
         raw_text=text,
         name=guess_name(text, fallback_name),
-        email=email_match.group(0) if email_match else "Not detected",
+        email=email,
         phone=phone if phone else "Not detected",
         **social_links,
         education=extract_education(text),
