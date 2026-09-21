@@ -177,7 +177,7 @@ Semantic Relevance runs on TF-IDF cosine similarity by default — zero extra
 install, instant. An optional sentence-transformer embeddings engine
 (`all-MiniLM-L6-v2`) is available for meaning-based matching (catches
 phrasing TF-IDF misses, e.g. "led a squad" vs. "managed a team"): install
-`requirements-embeddings.txt` and pick it in ⚙️ Settings → Semantic Matching
+`requirements.txt` and pick it in ⚙️ Settings → Semantic Matching
 Engine. If the package isn't installed, every mode transparently falls back
 to TF-IDF — nothing breaks. Each candidate's profile shows which engine
 actually produced their score.
