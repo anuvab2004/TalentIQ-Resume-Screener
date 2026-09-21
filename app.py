@@ -677,7 +677,12 @@ def page_upload():
 
             parsed_resumes.append(doc)
             filenames.append(fname)
-            db.upload_resume_file(fname, fbytes, req_id=rid, user_id=current_user_id())
+            import threading
+            threading.Thread(
+                target=db.upload_resume_file,
+                args=(fname, fbytes, rid, current_user_id()),
+                daemon=True,
+            ).start()
 
             if (i + 1) % 5 == 0 or i + 1 == len(file_records):
                 progress.progress(
@@ -732,8 +737,6 @@ def page_upload():
         )
 
         st.balloons()
-        import time
-        time.sleep(0.8)
         
         # Ask the next rerun to open Candidate Intelligence.
         # We use a separate flag because current_page belongs to the

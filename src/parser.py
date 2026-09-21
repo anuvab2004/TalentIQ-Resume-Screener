@@ -292,23 +292,47 @@ def extract_social_link_labels(text: str) -> dict:
 
 
 def extract_years_experience(text: str) -> float:
+    """Extract years of professional work experience.
+    Avoids mistaking academic study dates (e.g. 2023 - 2027 degree program)
+    for professional work experience."""
     m = YEARS_EXP_RE.search(text)
     if m:
         return float(m.group(1))
-    # fall back: infer from date ranges in an "Experience" section
+
+    # Look specifically within an Experience / Employment section
+    section_headers = r"(?:work\s+experience|professional\s+experience|employment\s+history|work\s+history|experience)"
+    next_headers = r"(?:education|technical\s+skills|skills|projects|project|certifications|publications|achievements|awards|interests|languages|hobbies)"
+
+    exp_pattern = re.compile(
+        rf"(?:^|\n)\s*{section_headers}\b[:\s]*(.*?)(?=\n\s*{next_headers}\b|\Z)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    exp_match = exp_pattern.search(text)
+    if not exp_match:
+        return 0.0
+
+    exp_text = exp_match.group(1)
+    if len(exp_text.strip()) < 10:
+        return 0.0
+
+    current_year = datetime.date.today().year
     years_found = []
-    for match in DATE_RANGE_RE.finditer(text):
+    for match in DATE_RANGE_RE.finditer(exp_text):
         span_text = match.group(0)
         start_match = re.search(r"(19|20)\d{2}", span_text)
         if start_match:
             start_year = int(start_match.group(0))
             if "present" in span_text.lower() or "current" in span_text.lower():
-                end_year = datetime.date.today().year
+                end_year = current_year
             else:
                 all_years = re.findall(r"(?:19|20)\d{2}", span_text)
                 end_year = int(all_years[-1]) if len(all_years) > 1 else start_year
-            if end_year and end_year >= start_year:
+            # Future end year is graduation or expected end, not past experience
+            if end_year > current_year:
+                continue
+            if current_year >= end_year >= start_year:
                 years_found.append(end_year - start_year)
+
     if years_found:
         return float(max(years_found))
     return 0.0
