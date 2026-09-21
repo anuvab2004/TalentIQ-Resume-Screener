@@ -372,6 +372,30 @@ class ParserRegressionSuite(unittest.TestCase):
         # "At least 3 years of hands-on development" must resolve to 3.0 years
         self.assertEqual(parsed["min_years"], 3.0)
 
+    def test_19_skill_validation_bug_c(self):
+        from src.parser import _is_valid_skill_token, extract_skills
+        # 1. Validation sanity check: reject date fragments, numbers, and stopword phrases
+        self.assertFalse(_is_valid_skill_token("2011 AIX"))
+        self.assertFalse(_is_valid_skill_token("2007 to 11"))
+        self.assertFalse(_is_valid_skill_token("2008 UNIX"))
+        self.assertFalse(_is_valid_skill_token("something and something else"))
+        
+        # Valid tools starting with numbers or containing whitelisted words
+        self.assertTrue(_is_valid_skill_token("3ds Max"))
+        self.assertTrue(_is_valid_skill_token("Design of Experiments"))
+        
+        # 2. End-to-end extraction from a job header line with slash dates & slashes between tools
+        header_text = "09/2007 to 11/2008 UNIX/AIX Linux System Engineer"
+        extracted = extract_skills(header_text)
+        # Must extract valid technical skills and never garbage date fragments
+        self.assertIn("Linux", extracted)
+        self.assertIn("Unix", extracted)
+        self.assertIn("AIX", extracted)
+        for s in extracted:
+            self.assertNotIn("2007", s)
+            self.assertNotIn("2008", s)
+            self.assertNotIn("11", s)
+
 
 if __name__ == "__main__":
     unittest.main()

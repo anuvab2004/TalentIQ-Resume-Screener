@@ -1168,8 +1168,13 @@ COMMON_ENGLISH_STOPWORDS = {
 SINGLE_LETTER_WHITELIST = {"c", "r"}
 
 
+NUMBER_START_WHITELIST = {"3ds max", "7-zip", "802.11", "3d modeling", "3d design", "2d animation", "3d animation"}
+COMPOUND_STOPWORD_WHITELIST = {"design of experiments", "internet of things", "point of sale", "c++", "c#", ".net"}
+
+
 def _is_valid_skill_token(token: str, in_skills_section: bool = False, full_text: str = "") -> bool:
-    """Filter out leaked headers, US state codes, single-letter junk, role titles, and common fragments."""
+    """Filter out leaked headers, US state codes, single-letter junk, role titles, date fragments,
+    mixed year/digit fragments, numbers, and invalid sentence pieces (Bug C validation layer)."""
     if not token:
         return False
     raw = token.strip()
@@ -1177,40 +1182,62 @@ def _is_valid_skill_token(token: str, in_skills_section: bool = False, full_text
     if not low:
         return False
 
-    # Never emit structural stop words (headers, sections)
+    # 1. Word count constraint: Real skills are 1–4 words long
+    words = low.split()
+    if len(words) < 1 or len(words) > 4:
+        return False
+
+    # 2. Never emit structural stop words (headers, sections)
     if low in STRUCTURAL_STOP_WORDS:
         return False
     if any(low == s or low.startswith(s + " ") or low.endswith(" " + s) for s in STRUCTURAL_STOP_WORDS):
         return False
 
-    # English stopword fragments
+    # 3. English stopword fragments
     if low in COMMON_ENGLISH_STOPWORDS:
         return False
 
-    # Single-character tokens: only 'c' or 'r' inside a Skills section or with explicit language context
+    # Standalone stopwords inside token: don't contain 'to', 'and', 'of', 'for' as standalone words
+    # unless part of a known whitelisted compound name like "Design of Experiments"
+    if low not in COMPOUND_STOPWORD_WHITELIST:
+        internal_stopwords = {"to", "and", "of", "for", "in", "at", "with", "from", "by", "on"}
+        if any(w in internal_stopwords for w in words):
+            return False
+
+    # 4. Don't start with a number (unless it's a known whitelisted tool/domain like 3ds Max, 3D Modeling)
+    if low[0].isdigit() and low not in NUMBER_START_WHITELIST:
+        return False
+
+    # 5. Don't mix digits and years / dates (e.g. '2011 aix', '09/2007', '2008 unix', '2007 to 11')
+    if re.search(r"\b(?:19|20)\d{2}\b", low):
+        # A 4-digit year should not be part of a skill unless in a specific taxonomy term
+        return False
+    if re.search(r"\b\d{1,2}/\d{2,4}\b", low):
+        return False
+    if any(w.isdigit() for w in words) and low not in NUMBER_START_WHITELIST:
+        return False
+
+    # 6. Single-character tokens: only 'c' or 'r' inside a Skills section or with explicit language context
     if len(low) == 1:
         if low not in SINGLE_LETTER_WHITELIST:
             return False
         if not in_skills_section:
-            # Check if text has "c/c++", "c, python", "r programming", etc.
             ctx_pat = rf"\b{re.escape(low)}\s*[/,]\s*(?:c\+\+|python|java|sql)|(?:language|programming|software)\s*:\s*.*?\b{re.escape(low)}\b"
             if not re.search(ctx_pat, full_text or "", re.IGNORECASE):
                 return False
 
-    # Two-letter tokens matching US State codes (TX, CA, NY...) unless explicitly in taxonomy (like Go)
+    # 7. Two-letter tokens matching US State codes (TX, CA, NY...) unless explicitly in taxonomy (like Go, AI, UI)
     if len(low) == 2 and low in US_STATE_CODES:
         if low not in ("go", "ai", "ui", "ux", "ts", "js", "pm", "qa", "hr"):
             return False
 
-    # Job title vs skill disambiguation: If token is a job title phrase
+    # 8. Job title vs skill disambiguation: If token is a job title phrase
     if ROLE_TITLE_PATTERNS.search(low):
-        # Exclude pure role titles like 'Senior Data Analyst', 'Data Analyst', 'Software Engineer'
-        # unless it is a specific recognized discipline skill in taxonomy (e.g. 'Data Analysis' is skill, 'Data Analyst' is title)
         if any(role_word in low for role_word in ("analyst", "engineer", "manager", "developer", "scientist", "consultant", "specialist", "intern", "director", "lead", "architect")):
             if low not in ("data engineering", "mechanical design", "electrical engineering", "quality assurance"):
                 return False
 
-    # Location / Contact / Metadata words
+    # 9. Location / Contact / Metadata words
     if low in ("austin", "texas", "california", "new york", "remote", "hybrid", "on-site", "not detected", "email", "phone"):
         return False
 
@@ -1230,6 +1257,14 @@ def extract_skills(text: str, extra_skills: list = None) -> list:
     cleaned_text = EMAIL_RE.sub(" ", text)
     cleaned_text = PHONE_RE.sub(" ", cleaned_text)
     cleaned_text = URL_RE.sub(" ", cleaned_text)
+
+    # Sanitize dates (e.g. '09/2007 to 11/2008', '2019-2023', '06/2016') so date numbers
+    # never stick to adjacent skills or combine with slashes (e.g. preventing '2007 to 11')
+    cleaned_text = re.sub(r"\b\d{1,2}/\d{2,4}\b", " ", cleaned_text)
+    cleaned_text = re.sub(r"\b(?:19|20)\d{2}\s*(?:to|-|–|—)\s*(?:(?:19|20)\d{2}|present|current|till\s+date|to\s+date)\b", " ", cleaned_text, flags=re.IGNORECASE)
+
+    # Replace newlines with spaces so newlines act as proper word boundaries
+    cleaned_text = cleaned_text.replace("\r", " ").replace("\n", " ")
 
     low = " " + re.sub(r"[^a-z0-9.+#/\s-]", " ", cleaned_text.lower()) + " "
     found = set()

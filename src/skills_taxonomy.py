@@ -34,7 +34,7 @@ SKILL_CATEGORIES = {
     "Cloud & DevOps": [
         "AWS", "Amazon Web Services", "Azure", "Google Cloud Platform", "GCP",
         "Docker", "Kubernetes", "Terraform", "Ansible", "Jenkins",
-        "CI/CD", "Git", "GitHub", "GitLab", "Linux", "Unix", "Bash",
+        "CI/CD", "Git", "GitHub", "GitLab", "Linux", "Unix", "AIX", "Bash",
         "Nginx", "Microservices", "Serverless", "DevOps",
         "Site Reliability Engineering", "Cloud Architecture",
     ],
@@ -163,6 +163,7 @@ SYNONYMS = {
     "bd": "Business Development",
     "seo/sem": "SEO",
     "excel spreadsheets": "Excel",
+    "aix": "AIX",
     "ms excel": "Excel",
     "powerbi": "Power BI",
     "power-bi": "Power BI",
