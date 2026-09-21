@@ -92,6 +92,13 @@ class CandidateManagementTests(unittest.TestCase):
         edu = extract_education(resume_text)
         self.assertEqual(edu, "Bachelor's Degree")
 
+    def test_clean_doubled_text(self):
+        from src.parser import clean_doubled_text
+        self.assertEqual(clean_doubled_text("EEDDUUCCAATTIIOONN"), "EDUCATION")
+        self.assertEqual(clean_doubled_text("SSUUMMMMAARRYY"), "SUMMARY")
+        self.assertEqual(clean_doubled_text("COMMUNICATION"), "COMMUNICATION")
+        self.assertEqual(clean_doubled_text("B.TECH IN EEDDUUCCAATTIIOONN"), "B.TECH IN EDUCATION")
+
 
 if __name__ == "__main__":
     unittest.main()

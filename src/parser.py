@@ -86,19 +86,59 @@ class ParsedDocument:
     skills: list = field(default_factory=list)
 
 
+def clean_doubled_text(text: str) -> str:
+    """Repair doubled-letter artifacts caused by PDF shadow-stroke rendering
+    (e.g., 'EEDDUUCCAATTIIOONN' -> 'EDUCATION')."""
+    if not text:
+        return ""
+
+    def _fix_word(match):
+        w = match.group(0)
+        if len(w) >= 6 and len(w) % 2 == 0:
+            if all(w[i].lower() == w[i + 1].lower() for i in range(0, len(w), 2)):
+                return "".join(w[i] for i in range(0, len(w), 2))
+        return w
+
+    return re.sub(r"\b[A-Za-z]{6,}\b", _fix_word, text)
+
+
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     import pdfplumber
     text_chunks = []
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
-            t = page.extract_text() or ""
+            # Filter out double-strike bold / shadow duplicate characters
+            # often emitted by Canva, LaTeX, and Word PDF generators
+            seen_chars = set()
+            dup_ids = set()
+            for c in getattr(page, "chars", []):
+                char_text = c.get("text", "")
+                if not char_text.strip():
+                    continue
+                # Key on character and quantized coordinate (within ~1.2 points)
+                pos_key = (char_text, round(c.get("x0", 0) / 1.2), round(c.get("top", 0) / 1.2))
+                if pos_key in seen_chars:
+                    dup_ids.add(id(c))
+                else:
+                    seen_chars.add(pos_key)
+
+            if dup_ids:
+                try:
+                    page_to_extract = page.filter(lambda obj: id(obj) not in dup_ids)
+                except Exception:
+                    page_to_extract = page
+            else:
+                page_to_extract = page
+
+            t = page_to_extract.extract_text() or ""
             # Some PDFs store the destination separately from the visible link text.
             for hyperlink in getattr(page, "hyperlinks", []):
                 uri = hyperlink.get("uri")
                 if uri:
                     t += f"\n{uri}"
             text_chunks.append(t)
-    return "\n".join(text_chunks)
+    raw_text = "\n".join(text_chunks)
+    return clean_doubled_text(raw_text)
 
 
 def extract_text_from_docx(file_bytes: bytes) -> str:

@@ -22,7 +22,7 @@ from src.matcher import (
     embeddings_available,
     WEIGHTS,
 )
-from src.parser import extract_social_link_labels, extract_social_links, parse_document, parse_job_description
+from src.parser import extract_social_link_labels, extract_social_links, parse_document, parse_job_description, clean_doubled_text
 from src.sample_data import list_sample_resumes, load_sample_resume_bytes, list_sample_jds
 
 st.set_page_config(
@@ -949,6 +949,7 @@ def candidate_profile_dialog(rid, result):
                 if isinstance(getattr(result, "factors", None), dict):
                     result.factors["raw_text"] = text_to_show
         if text_to_show and text_to_show.strip():
+            text_to_show = clean_doubled_text(text_to_show)
             st.caption("Original extracted text — use this to verify where a skill or experience claim was found.")
             st.text_area(
                 "Raw resume text", value=text_to_show, height=280,
