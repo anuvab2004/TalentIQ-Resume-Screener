@@ -240,11 +240,21 @@ def fetch_results(req_id: str, user_id: Optional[str] = None) -> list:
             cemail = row.get("email") or ""
             cphone = row.get("phone") or ""
             cid = row.get("candidate_id") or make_candidate_id(fname, cname, cemail, cphone) or f"cand_{idx}"
+            factors = row.get("factors") or {}
+            raw_text = factors.get("raw_text") or row.get("raw_text") or ""
+            if not raw_text and fname:
+                try:
+                    from .sample_data import list_sample_resumes, load_sample_resume_bytes
+                    if fname in list_sample_resumes():
+                        raw_text = load_sample_resume_bytes(fname).decode("utf-8", errors="replace")
+                except Exception:
+                    pass
+
             mr = MatchResult(
                 candidate_id=cid,
                 candidate_name=cname,
                 overall_score=float(row.get("overall_score") or 0),
-                factors=row.get("factors") or {},
+                factors=factors,
                 matched_skills=row.get("matched_skills") or [],
                 missing_skills=row.get("missing_skills") or [],
                 extra_skills=row.get("extra_skills") or [],
@@ -257,6 +267,7 @@ def fetch_results(req_id: str, user_id: Optional[str] = None) -> list:
                 years_experience=float(row.get("years_experience") or 0),
                 fairness_audit=row.get("fairness_audit") or {},
                 semantic_engine=row.get("semantic_engine") or "tfidf",
+                raw_text=raw_text,
             )
             results.append(mr)
         return results
@@ -307,6 +318,32 @@ def upload_resume_file(filename: str, file_bytes: bytes, req_id: str = "general"
     return None
 
 
+def download_resume_file(filename: str, req_id: str = "general", user_id: Optional[str] = None) -> Optional[bytes]:
+    """Download resume file bytes from Supabase storage isolated by tenant path."""
+    client = get_client()
+    if not client or not filename:
+        return None
+
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
+    clean_req = _unscoped_req_id(req_id, user_id)
+    paths_to_try = []
+    if user_id:
+        paths_to_try.append(f"{user_id}/{clean_req}/{safe_name}")
+    paths_to_try.append(f"{clean_req}/{safe_name}")
+    paths_to_try.append(safe_name)
+
+    candidate_buckets = ["resumes", "Resumes", "resume", "Resume"]
+    for bucket in candidate_buckets:
+        for p in paths_to_try:
+            try:
+                data = client.storage.from_(bucket).download(p)
+                if data:
+                    return data
+            except Exception:
+                continue
+    return None
+
+
 def save_results(req_id: str, results: list, existing_actions: Optional[Dict] = None, user_id: Optional[str] = None) -> bool:
     """Batch upsert candidate screening results into Supabase scoped to user_id."""
     client = get_client()
@@ -324,6 +361,10 @@ def save_results(req_id: str, results: list, existing_actions: Optional[Dict] = 
             elif existing_actions and (req_id, r.candidate_name) in existing_actions:
                 hr_status = existing_actions[(req_id, r.candidate_name)]
 
+            factors_dict = dict(r.factors or {})
+            if getattr(r, "raw_text", None):
+                factors_dict["raw_text"] = r.raw_text
+
             row: Dict[str, Any] = {
                 "req_id": db_id,
                 "candidate_name": r.candidate_name,
@@ -335,7 +376,7 @@ def save_results(req_id: str, results: list, existing_actions: Optional[Dict] = 
                 "overall_score": float(r.overall_score),
                 "status": r.status,
                 "rationale": r.rationale,
-                "factors": r.factors or {},
+                "factors": factors_dict,
                 "matched_skills": r.matched_skills or [],
                 "missing_skills": r.missing_skills or [],
                 "extra_skills": r.extra_skills or [],
@@ -354,6 +395,38 @@ def save_results(req_id: str, results: list, existing_actions: Optional[Dict] = 
         return True
     except Exception as e:
         print(f"[Supabase] save_results error: {e}")
+        return False
+
+
+def delete_candidates_for_requisition(req_id: str, user_id: Optional[str] = None) -> bool:
+    """Delete all candidate records, interview guides, and email logs for a requisition scoped to user_id."""
+    client = get_client()
+    if not client:
+        return False
+    try:
+        db_id = _scoped_req_id(req_id, user_id)
+        client.table("email_logs").delete().eq("req_id", db_id).execute()
+        client.table("interview_guides").delete().eq("req_id", db_id).execute()
+        client.table("candidates").delete().eq("req_id", db_id).execute()
+        return True
+    except Exception as e:
+        print(f"[Supabase] delete_candidates_for_requisition error: {e}")
+        return False
+
+
+def delete_candidate(req_id: str, candidate_name: str, user_id: Optional[str] = None) -> bool:
+    """Delete a single candidate and associated interview guides and email logs scoped to user_id."""
+    client = get_client()
+    if not client:
+        return False
+    try:
+        db_id = _scoped_req_id(req_id, user_id)
+        client.table("email_logs").delete().eq("req_id", db_id).eq("candidate_name", candidate_name).execute()
+        client.table("interview_guides").delete().eq("req_id", db_id).eq("candidate_name", candidate_name).execute()
+        client.table("candidates").delete().eq("req_id", db_id).eq("candidate_name", candidate_name).execute()
+        return True
+    except Exception as e:
+        print(f"[Supabase] delete_candidate error: {e}")
         return False
 
 

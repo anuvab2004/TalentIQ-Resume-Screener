@@ -628,12 +628,22 @@ def page_upload():
     existing_results = st.session_state["results"].get(rid, [])
     upload_mode = "Append to existing pool"
     if existing_results:
-        upload_mode = st.radio(
-            f"This requisition already has {len(existing_results)} screened candidate"
-            f"{'s' if len(existing_results) != 1 else ''}. What should this run do?",
-            ["Append to existing pool", "Replace existing pool"],
-            horizontal=True,
-        )
+        col_mode, col_clear = st.columns([3, 1.2])
+        with col_mode:
+            upload_mode = st.radio(
+                f"This requisition already has {len(existing_results)} screened candidate"
+                f"{'s' if len(existing_results) != 1 else ''}. What should this run do?",
+                ["Append to existing pool", "Replace existing pool"],
+                horizontal=True,
+            )
+        with col_clear:
+            st.write("")
+            st.write("")
+            with st.popover("🗑️ Clear Pool Now"):
+                st.caption(f"Permanently remove all {len(existing_results)} candidates for this role to start fresh?")
+                if st.button("Confirm: Clear Pool", key=f"clear_upload_{rid}", type="primary"):
+                    clear_requisition_candidates(rid, user_id=current_user_id())
+                    st.rerun()
 
     file_records = []
     if uploaded_files:
@@ -721,6 +731,12 @@ def page_upload():
                 by_id[nr.candidate_id] = nr
             combined = list(by_id.values())
         else:
+            # Replace existing pool: clear old database records for this requisition
+            db.delete_candidates_for_requisition(rid, user_id=current_user_id())
+            if "candidate_actions" in st.session_state:
+                st.session_state["candidate_actions"] = {
+                    k: v for k, v in st.session_state["candidate_actions"].items() if k[0] != rid
+                }
             combined = new_results
 
         combined = rank_candidates(combined, weights=req_weights)
@@ -767,6 +783,62 @@ def _social_url(result, field_name):
     return extract_social_links(getattr(result, "raw_text", "")).get(field_name, "Not detected")
 
 
+def remove_candidate_from_state(rid: str, candidate_name: str, candidate_id: str = "", user_id: str = None):
+    """Remove a single candidate from DB and local session state."""
+    db.delete_candidate(rid, candidate_name, user_id=user_id)
+    if rid in st.session_state.get("results", {}):
+        st.session_state["results"][rid] = [
+            r for r in st.session_state["results"][rid]
+            if r.candidate_name != candidate_name and (not candidate_id or getattr(r, "candidate_id", None) != candidate_id)
+        ]
+    actions = st.session_state.get("candidate_actions", {})
+    keys_to_del = [
+        k for k in list(actions.keys())
+        if k[0] == rid and (k[1] == candidate_name or (candidate_id and k[1] == candidate_id))
+    ]
+    for k in keys_to_del:
+        actions.pop(k, None)
+
+
+def clear_requisition_candidates(rid: str, user_id: str = None):
+    """Remove all candidates for this requisition from DB and local session state."""
+    db.delete_candidates_for_requisition(rid, user_id=user_id)
+    if rid in st.session_state.get("results", {}):
+        st.session_state["results"][rid] = []
+    actions = st.session_state.get("candidate_actions", {})
+    for k in [k for k in list(actions.keys()) if k[0] == rid]:
+        actions.pop(k, None)
+    guides = st.session_state.get("interview_guides", {})
+    for k in [k for k in list(guides.keys()) if k[0] == rid]:
+        guides.pop(k, None)
+    logs = st.session_state.get("email_log", {})
+    for k in [k for k in list(logs.keys()) if k[0] == rid]:
+        logs.pop(k, None)
+
+
+def _resolve_candidate_raw_text(result, rid):
+    """Fallback to sample resumes or Supabase storage if raw_text is missing in memory."""
+    fname = getattr(result, "filename", "")
+    if not fname:
+        return ""
+    try:
+        if fname in list_sample_resumes():
+            b = load_sample_resume_bytes(fname)
+            if b:
+                return b.decode("utf-8", errors="replace")
+    except Exception:
+        pass
+    try:
+        b = db.download_resume_file(fname, req_id=rid, user_id=current_user_id())
+        if b:
+            doc = parse_document(fname, b, extra_skills=st.session_state.get("custom_skills"))
+            if doc and doc.raw_text:
+                return doc.raw_text
+    except Exception:
+        pass
+    return ""
+
+
 @st.dialog("Candidate Profile", width="large")
 def candidate_profile_dialog(rid, result):
     cid = result.candidate_id or re.sub(r"[^a-zA-Z0-9_]", "_", result.candidate_name) or "cand"
@@ -799,7 +871,7 @@ def candidate_profile_dialog(rid, result):
     )
 
     current_action = st.session_state["candidate_actions"].get((rid, result.candidate_id), "—")
-    a1, a2, a3, a4 = st.columns(4)
+    a1, a2, a3, a4, a5 = st.columns([1.1, 1.3, 1.0, 1.2, 1.1])
     if a1.button("⭐ Shortlist", key=f"short_{key_prefix}", type="primary" if current_action != "Shortlisted" else "secondary"):
         st.session_state["candidate_actions"][(rid, result.candidate_id)] = "Shortlisted"
         db.update_candidate_action(rid, result.candidate_name, "Shortlisted", user_id=current_user_id())
@@ -815,6 +887,12 @@ def candidate_profile_dialog(rid, result):
     profile_txt = build_profile_text(result)
     a4.download_button("⬇ Download", data=profile_txt, file_name=f"{result.candidate_name.replace(' ', '_')}_profile.txt",
                         key=f"dl_{key_prefix}")
+    with a5:
+        with st.popover("🗑️ Remove"):
+            st.caption(f"Remove **{result.candidate_name}** from this pool?")
+            if st.button("Confirm Delete", key=f"del_confirm_{key_prefix}", type="primary"):
+                remove_candidate_from_state(rid, result.candidate_name, result.candidate_id, user_id=current_user_id())
+                st.rerun()
 
     if current_action != "—":
         st.caption(f"HR status: **{current_action}**")
@@ -863,10 +941,17 @@ def candidate_profile_dialog(rid, result):
         st.markdown("".join(f'<span class="tiq-skill-chip chip-extra">{s}</span>' for s in result.extra_skills[:20]), unsafe_allow_html=True)
 
     with st.expander("📄 View raw resume text"):
-        if result.raw_text and result.raw_text.strip():
+        text_to_show = getattr(result, "raw_text", "") or ""
+        if not text_to_show.strip():
+            text_to_show = _resolve_candidate_raw_text(result, rid)
+            if text_to_show:
+                result.raw_text = text_to_show
+                if isinstance(getattr(result, "factors", None), dict):
+                    result.factors["raw_text"] = text_to_show
+        if text_to_show and text_to_show.strip():
             st.caption("Original extracted text — use this to verify where a skill or experience claim was found.")
             st.text_area(
-                "Raw resume text", value=result.raw_text, height=280,
+                "Raw resume text", value=text_to_show, height=280,
                 key=f"rawtext_{key_prefix}", label_visibility="collapsed",
             )
         else:
@@ -1067,7 +1152,17 @@ def page_candidates():
         unsafe_allow_html=True,
     )
 
-    search = st.text_input("🔍 Search candidate name or skill", "")
+    c_search, c_clear = st.columns([4, 1.2])
+    with c_search:
+        search = st.text_input("🔍 Search candidate name or skill", "")
+    with c_clear:
+        st.write("")
+        st.write("")
+        with st.popover("🗑️ Clear Pool"):
+            st.caption(f"Permanently remove all **{len(results)}** candidates for this role?")
+            if st.button("Confirm: Clear Pool", key=f"clear_cand_page_{rid}", type="primary"):
+                clear_requisition_candidates(rid, user_id=current_user_id())
+                st.rerun()
     tabs = st.tabs(["All", "Strong Match", "Good Match", "Review", "Low Match", "Shortlisted"])
     tab_filters = ["All", "Strong Match", "Good Match", "Review", "Low Match", "Shortlisted"]
 
