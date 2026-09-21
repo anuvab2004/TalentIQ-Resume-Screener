@@ -1051,13 +1051,12 @@ def candidate_profile_dialog(rid, result):
     # ----------------------------------------------------------------------
     # Option to view submitted resume vs parsed resume
     # ----------------------------------------------------------------------
-    sub_fname, sub_bytes = _get_submitted_resume_bytes(result, rid)
-    sub_ext = sub_fname.split(".")[-1].lower() if sub_fname and "." in sub_fname else "txt"
-    sub_mime = "application/pdf" if sub_ext == "pdf" else (
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if sub_ext == "docx" else "text/plain"
-    )
-
     with st.expander("📑 View Submitted Resume (Original vs. Parsed)", expanded=False):
+        sub_fname, sub_bytes = _get_submitted_resume_bytes(result, rid)
+        sub_ext = sub_fname.split(".")[-1].lower() if sub_fname and "." in sub_fname else "txt"
+        sub_mime = "application/pdf" if sub_ext == "pdf" else (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if sub_ext == "docx" else "text/plain"
+        )
         st.caption(
             "Compare the candidate's original submitted document against the structured data extracted by TalentIQ."
         )
@@ -1087,7 +1086,7 @@ def candidate_profile_dialog(rid, result):
                     elif sub_bytes:
                         display_orig = sub_bytes.decode("utf-8", errors="replace")
                     else:
-                        display_orig = getattr(result, "raw_text", "") or _resolve_candidate_raw_text(result, rid)
+                        display_orig = raw_resume_text
 
                     display_orig = clean_doubled_text(display_orig)
                     st.text_area(
@@ -1111,30 +1110,29 @@ def candidate_profile_dialog(rid, result):
             with parsed_col:
                 st.markdown("###### 🤖 Structured Parsed Output")
                 parsed_card = [
-                    f"**👤 Name:** {result.candidate_name}",
-                    f"**📧 Email:** {result.email}",
-                    f"**📞 Phone:** {result.phone}",
-                    f"**🎓 Education:** {result.education}",
-                    f"**⏳ Experience:** {format_experience(result.years_experience, getattr(result, 'experience_months', None))}",
+                    f'<div><span style="font-weight:700;color:#1e293b;">👤 Name:</span> &nbsp;{html.escape(str(result.candidate_name))}</div>',
+                    f'<div><span style="font-weight:700;color:#1e293b;">📧 Email:</span> &nbsp;{html.escape(str(result.email))}</div>',
+                    f'<div><span style="font-weight:700;color:#1e293b;">📞 Phone:</span> &nbsp;{html.escape(str(result.phone))}</div>',
+                    f'<div><span style="font-weight:700;color:#1e293b;">🎓 Education:</span> &nbsp;{html.escape(str(result.education))}</div>',
+                    f'<div><span style="font-weight:700;color:#1e293b;">⏳ Experience:</span> &nbsp;{html.escape(str(format_experience(result.years_experience, getattr(result, "experience_months", None))))}</div>',
                 ]
                 if result.linkedin_url and result.linkedin_url != "Not detected":
-                    parsed_card.append(f"**🔗 LinkedIn:** [{result.linkedin_url}]({result.linkedin_url})")
+                    parsed_card.append(f'<div><span style="font-weight:700;color:#1e293b;">🔗 LinkedIn:</span> &nbsp;<a href="{html.escape(result.linkedin_url)}" target="_blank">{html.escape(result.linkedin_url)}</a></div>')
                 if result.github_url and result.github_url != "Not detected":
-                    parsed_card.append(f"**🐙 GitHub:** [{result.github_url}]({result.github_url})")
+                    parsed_card.append(f'<div><span style="font-weight:700;color:#1e293b;">🐙 GitHub:</span> &nbsp;<a href="{html.escape(result.github_url)}" target="_blank">{html.escape(result.github_url)}</a></div>')
                 if result.portfolio_url and result.portfolio_url != "Not detected":
-                    parsed_card.append(f"**🌐 Portfolio:** [{result.portfolio_url}]({result.portfolio_url})")
+                    parsed_card.append(f'<div><span style="font-weight:700;color:#1e293b;">🌐 Portfolio:</span> &nbsp;<a href="{html.escape(result.portfolio_url)}" target="_blank">{html.escape(result.portfolio_url)}</a></div>')
 
                 st.markdown(
-                    '<div style="background:rgba(248,250,252,0.8);border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-bottom:12px;font-size:0.88rem;line-height:1.6;">'
-                    + "<br>".join(parsed_card)
+                    '<div style="background:rgba(248,250,252,0.8);border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-bottom:12px;font-size:0.88rem;line-height:1.7;">'
+                    + "".join(parsed_card)
                     + "</div>",
                     unsafe_allow_html=True,
                 )
 
                 st.markdown("**💼 Detected Work History:**")
-                det_roles = extract_work_periods(getattr(result, "raw_text", "") or _resolve_candidate_raw_text(result, rid))
-                if det_roles:
-                    for dr in det_roles[:5]:
+                if detected_periods:
+                    for dr in detected_periods[:5]:
                         d_m = dr.get("months", 0)
                         d_str = f" · **{d_m} mo{'s' if d_m != 1 else ''}**" if d_m > 0 else ""
                         st.markdown(f"- **{dr['period']}**{d_str}")
@@ -1169,7 +1167,7 @@ def candidate_profile_dialog(rid, result):
                 elif sub_bytes:
                     doc_text = sub_bytes.decode("utf-8", errors="replace")
                 else:
-                    doc_text = getattr(result, "raw_text", "") or _resolve_candidate_raw_text(result, rid)
+                    doc_text = raw_resume_text
 
                 st.text_area(
                     "Submitted Resume Content",
@@ -1187,24 +1185,6 @@ def candidate_profile_dialog(rid, result):
                     mime=sub_mime,
                     key=f"dl_full_{key_prefix}",
                 )
-
-    with st.expander("📄 View raw resume text"):
-        text_to_show = getattr(result, "raw_text", "") or ""
-        if not text_to_show.strip():
-            text_to_show = _resolve_candidate_raw_text(result, rid)
-            if text_to_show:
-                result.raw_text = text_to_show
-                if isinstance(getattr(result, "factors", None), dict):
-                    result.factors["raw_text"] = text_to_show
-        if text_to_show and text_to_show.strip():
-            text_to_show = clean_doubled_text(text_to_show)
-            st.caption("Original extracted text — use this to verify where a skill or experience claim was found.")
-            st.text_area(
-                "Raw resume text", value=text_to_show, height=280,
-                key=f"rawtext_{key_prefix}", label_visibility="collapsed",
-            )
-        else:
-            st.caption("No extractable text was found in this document.")
 
     if result.fairness_audit:
         fa = result.fairness_audit
