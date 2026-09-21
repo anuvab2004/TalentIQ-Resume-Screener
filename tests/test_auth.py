@@ -67,9 +67,9 @@ class PerUserSettingsTests(unittest.TestCase):
         self.assertEqual(settings_store.load_org_settings("user_3")["company_name"], "Your Company")
 
     def test_prefs_are_isolated_per_user(self):
-        settings_store.save_app_prefs({"seed_demo_requisition": False}, user_id="user_1")
-        self.assertFalse(settings_store.load_app_prefs("user_1")["seed_demo_requisition"])
-        self.assertTrue(settings_store.load_app_prefs("user_2")["seed_demo_requisition"])
+        settings_store.save_app_prefs({"seed_demo_requisition": True}, user_id="user_1")
+        self.assertTrue(settings_store.load_app_prefs("user_1")["seed_demo_requisition"])
+        self.assertFalse(settings_store.load_app_prefs("user_2")["seed_demo_requisition"])
 
     def test_smtp_credentials_are_isolated_per_user(self):
         cfg = {"provider": "Gmail", "host": "smtp.gmail.com", "port": 587, "tls": True,

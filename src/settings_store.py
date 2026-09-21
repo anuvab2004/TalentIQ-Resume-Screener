@@ -54,9 +54,9 @@ DEFAULT_ORG = {
 }
 
 DEFAULT_PREFS = {
-    # Start every new session with the bundled demo requisition (ML Engineer).
-    # Turn this off to start with zero active jobs.
-    "seed_demo_requisition": True,
+    # Start every new session with zero active jobs.
+    # Set this to True to auto-seed the demo requisition (ML Engineer).
+    "seed_demo_requisition": False,
 }
 
 DEFAULT_SMTP = {

@@ -98,9 +98,14 @@ def _brand_header():
 
 
 def _start_session(user: dict):
-    """Log the visitor in with a clean slate, then rerun into the app."""
+    """Log the visitor in with a clean slate, set persistent session, then rerun into the app."""
     st.session_state.clear()          # nothing from a previous visitor can leak in
     st.session_state["user"] = user
+    try:
+        token = auth.create_session_token(user)
+        st.query_params["session"] = token
+    except Exception:
+        pass
     st.rerun()
 
 

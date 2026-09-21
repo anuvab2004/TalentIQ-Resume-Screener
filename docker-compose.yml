@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        INSTALL_EMBEDDINGS: "false"
+        INSTALL_EMBEDDINGS: "true"
     container_name: talentiq-app
     ports:
       - "${TALENTIQ_PORT:-8501}:8501"
@@ -19,6 +19,7 @@ services:
     env_file:
       - .env
     volumes:
+      - ./:/app
       - talentiq-data:/app/data
     restart: unless-stopped
     healthcheck:

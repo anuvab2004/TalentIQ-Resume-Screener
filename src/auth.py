@@ -4,7 +4,13 @@ Account backend for TalentIQ using Supabase Auth.
 Replaces SQLite completely. All authentication (sign-up, sign-in, session management,
 and password management) is handled by Supabase Auth (GoTrue).
 """
+import os
 import re
+import time
+import json
+import base64
+import hmac
+import hashlib
 from typing import Optional, Tuple, Dict, Any
 
 from . import db
@@ -15,6 +21,44 @@ MIN_PASSWORD_LEN = 8
 MAX_PASSWORD_LEN = 128
 
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+'\-]+@[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}$")
+_SESSION_SECRET = os.environ.get("SUPABASE_KEY", "talentiq-session-secret-2024")
+
+
+def create_session_token(user: Dict[str, str]) -> str:
+    """Generate a tamper-proof HMAC-signed session token for browser persistence."""
+    payload = {
+        "uid": str(user.get("id", "")),
+        "email": str(user.get("email", "")),
+        "name": str(user.get("name", "")),
+        "exp": int(time.time()) + (86400 * 7),  # 7-day persistence
+    }
+    raw_json = json.dumps(payload, separators=(',', ':')).encode("utf-8")
+    b64_payload = base64.urlsafe_b64encode(raw_json).decode("ascii")
+    signature = hmac.new(_SESSION_SECRET.encode("utf-8"), b64_payload.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{b64_payload}.{signature}"
+
+
+def verify_session_token(token: str) -> Optional[Dict[str, str]]:
+    """Validate a signed session token and return user dict if valid and unexpired."""
+    if not token or "." not in token:
+        return None
+    try:
+        b64_payload, signature = token.split(".", 1)
+        expected_sig = hmac.new(_SESSION_SECRET.encode("utf-8"), b64_payload.encode("ascii"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected_sig):
+            return None
+        payload = json.loads(base64.urlsafe_b64decode(b64_payload.encode("ascii")).decode("utf-8"))
+        if payload.get("exp", 0) < time.time():
+            return None
+        if not payload.get("uid"):
+            return None
+        return {
+            "id": str(payload["uid"]),
+            "email": str(payload.get("email", "")),
+            "name": str(payload.get("name", "")),
+        }
+    except Exception:
+        return None
 
 
 def normalize_email(email: Any) -> str:

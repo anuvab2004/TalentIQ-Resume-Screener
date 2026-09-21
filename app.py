@@ -37,26 +37,6 @@ def load_ai_model():
     return preload_embedding_model()
 
 
-# ============================================================
-# TALENTIQ AI STARTUP
-# ============================================================
-
-if "_ai_startup_complete" not in st.session_state:
-    left, center, right = st.columns([1, 2, 1])
-
-    with center:
-        st.markdown("## 🧭")
-        st.title("TalentIQ")
-        st.caption("Enterprise Talent Intelligence")
-
-        with st.spinner("🧠 Initializing AI Engine..."):
-            load_ai_model()
-
-        st.success("AI Engine Ready ✓")
-
-    st.session_state["_ai_startup_complete"] = True
-    st.rerun()
-
 styling.inject(st)
 
 DEPARTMENTS = ["Engineering", "Data & AI", "Product", "Design", "Sales", "Finance", "Human Resources", "Operations"]
@@ -67,7 +47,21 @@ EDU_OPTIONS = ["Not detected", "High School", "Diploma", "Associate Degree", "Ba
 # Signed-in user
 # --------------------------------------------------------------------------
 def current_user():
-    return st.session_state.get("user")
+    user = st.session_state.get("user")
+    if user:
+        return user
+    try:
+        token = st.query_params.get("session")
+        if token:
+            verified = auth.verify_session_token(token)
+            if verified:
+                st.session_state["user"] = verified
+                return verified
+            else:
+                st.query_params.pop("session", None)
+    except Exception:
+        pass
+    return None
 
 
 def current_user_id():
@@ -79,6 +73,10 @@ def sign_out():
     """Sign out of Supabase and clear the session state."""
     auth.sign_out()
     st.session_state.clear()
+    try:
+        st.query_params.pop("session", None)
+    except Exception:
+        pass
     st.rerun()
 
 
@@ -89,8 +87,11 @@ def sync_from_database():
     """Attempt to hydrate in-memory state from Supabase if configured."""
     if not db.is_configured():
         return False
+    uid = current_user_id()
+    if not uid:
+        return False
     try:
-        reqs = db.fetch_requisitions()
+        reqs = db.fetch_requisitions(user_id=uid)
         if reqs:
             st.session_state["requisitions"] = reqs
             if not st.session_state.get("active_req_id") or st.session_state["active_req_id"] not in reqs:
@@ -101,10 +102,19 @@ def sync_from_database():
             ]
             st.session_state["req_counter"] = max(num_ids) if num_ids else len(reqs)
             for rid in reqs:
-                st.session_state["results"][rid] = db.fetch_results(rid)
-            st.session_state["candidate_actions"] = db.fetch_all_candidate_actions()
-            st.session_state["interview_guides"] = db.fetch_all_interview_guides()
-            st.session_state["email_log"] = db.fetch_all_email_logs()
+                st.session_state["results"][rid] = db.fetch_results(rid, user_id=uid)
+            st.session_state["candidate_actions"] = db.fetch_all_candidate_actions(user_id=uid)
+            st.session_state["interview_guides"] = db.fetch_all_interview_guides(user_id=uid)
+            st.session_state["email_log"] = db.fetch_all_email_logs(user_id=uid)
+            return True
+        else:
+            st.session_state["requisitions"] = {}
+            st.session_state["results"] = {}
+            st.session_state["candidate_actions"] = {}
+            st.session_state["interview_guides"] = {}
+            st.session_state["email_log"] = {}
+            st.session_state["active_req_id"] = None
+            st.session_state["req_counter"] = 0
             return True
     except Exception as e:
         print(f"[Supabase sync error] {e}")
@@ -124,6 +134,9 @@ def init_state():
     ss.setdefault("semantic_backend", "auto")
     ss.setdefault("default_weights", dict(WEIGHTS))  # org-wide default scoring weights (fractions summing to 1.0)
     ss.setdefault("custom_skills", [])      # extra taxonomy terms recruiters have added (e.g. LangGraph, vLLM)
+    if "_ai_warmed" not in ss:
+        load_ai_model()
+        ss["_ai_warmed"] = True
     # Organization identity, workspace defaults and SMTP credentials are
     # PERSISTENT: loaded from disk once per new session (see src/settings_store.py)
     # so they survive page refreshes and app restarts until the user changes them.
@@ -170,7 +183,7 @@ def seed_default_requisition():
         "created_at": dt.datetime.now(),
     }
     st.session_state["requisitions"][req_id] = req_data
-    db.save_requisition(req_data)
+    db.save_requisition(req_data, user_id=current_user_id())
     st.session_state["active_req_id"] = req_id
     st.session_state["req_counter"] = 1
 
@@ -200,7 +213,7 @@ def delete_requisition(rid):
     for key in ("upload_req_selector", "cand_req_selector", "dash_remove_req", "dash_remove_confirm"):
         ss.pop(key, None)
     ss["confirm_delete_req"] = None
-    db.delete_requisition(rid)
+    db.delete_requisition(rid, user_id=current_user_id())
 
 
 def _local_now():
@@ -298,11 +311,17 @@ def sidebar_nav():
         n_results = sum(len(v) for v in st.session_state["results"].values())
         last_run = st.session_state["last_run_at"]
         last_run_str = last_run.strftime("%H:%M:%S") if last_run else "no runs yet"
+        has_emb = embeddings_available()
+        engine_badge = (
+            "<span style='color:#34d399;font-weight:600;'>🧠 all-MiniLM-L6-v2</span>"
+            if has_emb
+            else "<span style='color:#fbbf24;font-weight:600;'>⚡ TF-IDF Fallback</span>"
+        )
         st.markdown(
             f"""
             <div style='font-size:0.78rem;line-height:1.9;opacity:0.9;'>
             🔒 Secure HR Workspace<br/>
-            ⚙️ AI Engine Ready<br/>
+            ⚙️ AI Engine: {engine_badge}<br/>
             ✅ {n_results} candidates processed<br/>
             🕒 Last run: {last_run_str}
             </div>
@@ -360,8 +379,16 @@ def page_dashboard():
         if rows:
             st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
         else:
-            st.info("No active job requisitions. Add one from **Create Job Requisition** in the sidebar "
-                    "whenever you're ready to hire.")
+            st.info("No active job requisitions for your organization yet.")
+            btn_col1, btn_col2 = st.columns([1, 1])
+            with btn_col1:
+                if st.button("➕ Create Job Requisition", key="dash_create_job_btn"):
+                    st.session_state["navigate_to"] = "➕ Create Job Requisition"
+                    st.rerun()
+            with btn_col2:
+                if st.button("📦 Load Sample Requisition (ML Engineer)", key="dash_load_sample_btn"):
+                    seed_default_requisition()
+                    st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
         if rows:
@@ -575,6 +602,20 @@ def page_upload():
     #st.markdown('<div class="tiq-card">', unsafe_allow_html=True)
     st.markdown("##### 📤 Drop resumes here")
     st.caption("Upload PDF, DOCX, or TXT resumes in bulk — supports multiple files at once.")
+    if embeddings_available():
+        st.markdown(
+            '<div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:0.82rem;display:flex;align-items:center;gap:8px;">'
+            '<span>🧠</span><div><b style="color:#10b981;">AI Engine Active: all-MiniLM-L6-v2</b> &mdash; Resumes will be matched using dense semantic neural embeddings.</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:0.82rem;display:flex;align-items:center;gap:8px;">'
+            '<span>⚡</span><div><b style="color:#f59e0b;">AI Fallback Mode: TF-IDF Engine Active</b> &mdash; <code>sentence-transformers</code> is not installed; semantic scores use TF-IDF cosine similarity.</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
     uploaded_files = st.file_uploader(
         "Upload resumes", type=["pdf", "docx", "txt"], accept_multiple_files=True,
@@ -635,7 +676,7 @@ def page_upload():
 
             parsed_resumes.append(doc)
             filenames.append(fname)
-            db.upload_resume_file(fname, fbytes, req_id=rid)
+            db.upload_resume_file(fname, fbytes, req_id=rid, user_id=current_user_id())
 
             if (i + 1) % 5 == 0 or i + 1 == len(file_records):
                 progress.progress(
@@ -679,7 +720,7 @@ def page_upload():
         combined = rank_candidates(combined, weights=req_weights)
         st.session_state["results"][rid] = combined
         st.session_state["last_run_at"] = dt.datetime.now()
-        db.save_results(rid, combined, st.session_state.get("candidate_actions"))
+        db.save_results(rid, combined, st.session_state.get("candidate_actions"), user_id=current_user_id())
         progress.empty()
 
         
@@ -724,7 +765,8 @@ def _social_url(result, field_name):
 
 @st.dialog("Candidate Profile", width="large")
 def candidate_profile_dialog(rid, result):
-    key_prefix = f"{rid}::{result.candidate_id}"
+    cid = result.candidate_id or re.sub(r"[^a-zA-Z0-9_]", "_", result.candidate_name) or "cand"
+    key_prefix = f"{rid}::{cid}"
     c1, c2 = st.columns([1, 5])
     with c1:
         st.markdown(_initials_avatar(result.candidate_name, 56), unsafe_allow_html=True)
@@ -756,15 +798,15 @@ def candidate_profile_dialog(rid, result):
     a1, a2, a3, a4 = st.columns(4)
     if a1.button("⭐ Shortlist", key=f"short_{key_prefix}", type="primary" if current_action != "Shortlisted" else "secondary"):
         st.session_state["candidate_actions"][(rid, result.candidate_id)] = "Shortlisted"
-        db.update_candidate_action(rid, result.candidate_name, "Shortlisted")
+        db.update_candidate_action(rid, result.candidate_name, "Shortlisted", user_id=current_user_id())
         st.rerun()
     if a2.button("🔎 Move to Review", key=f"rev_{key_prefix}"):
         st.session_state["candidate_actions"][(rid, result.candidate_id)] = "Review"
-        db.update_candidate_action(rid, result.candidate_name, "Review")
+        db.update_candidate_action(rid, result.candidate_name, "Review", user_id=current_user_id())
         st.rerun()
     if a3.button("✖ Reject", key=f"rej_{key_prefix}"):
         st.session_state["candidate_actions"][(rid, result.candidate_id)] = "Rejected"
-        db.update_candidate_action(rid, result.candidate_name, "Rejected")
+        db.update_candidate_action(rid, result.candidate_name, "Rejected", user_id=current_user_id())
         st.rerun()
     profile_txt = build_profile_text(result)
     a4.download_button("⬇ Download", data=profile_txt, file_name=f"{result.candidate_name.replace(' ', '_')}_profile.txt",
@@ -775,10 +817,13 @@ def candidate_profile_dialog(rid, result):
 
     st.markdown("---")
     st.markdown("##### AI Match Analysis")
-    engine_display = {"tfidf": "TF-IDF", "embeddings": "sentence-transformer embeddings"}.get(
-        result.semantic_engine, result.semantic_engine
-    )
-    st.caption(f"Semantic Relevance computed via {engine_display}.")
+    if "embeddings" in result.semantic_engine:
+        engine_chip = '<span style="background:rgba(16,185,129,0.15);color:#10b981;padding:2px 8px;border-radius:10px;font-size:0.75rem;font-weight:600;border:1px solid rgba(16,185,129,0.3);">🧠 all-MiniLM-L6-v2 Embeddings</span>'
+        engine_note = "Dense semantic neural vectors"
+    else:
+        engine_chip = '<span style="background:rgba(245,158,11,0.15);color:#f59e0b;padding:2px 8px;border-radius:10px;font-size:0.75rem;font-weight:600;border:1px solid rgba(245,158,11,0.3);">⚡ TF-IDF Fallback</span>'
+        engine_note = "Frequency-inverse document cosine matching"
+    st.markdown(f'<div style="margin-bottom:8px;font-size:0.82rem;">Engine used: &nbsp;{engine_chip} &nbsp;<span style="color:#6b7290;">({engine_note})</span></div>', unsafe_allow_html=True)
     factor_labels = {
         "semantic_relevance": "Semantic Relevance",
         "skill_alignment": "Skill Alignment",
@@ -841,7 +886,7 @@ def candidate_profile_dialog(rid, result):
     if st.button("Generate Interview Questions", key=f"gen_q_{key_prefix}"):
         questions = interview_questions.generate_interview_questions(result, req_title)
         st.session_state["interview_guides"][guide_key] = questions
-        db.save_interview_guide(rid, result.candidate_name, questions)
+        db.save_interview_guide(rid, result.candidate_name, questions, user_id=current_user_id())
     guide = st.session_state["interview_guides"].get(guide_key)
     if guide:
         for i, q in enumerate(guide):
@@ -853,11 +898,11 @@ def candidate_profile_dialog(rid, result):
             q["question"] = question
             if st.button("🗑 Delete question", key=f"del_guide_q_{key_prefix}_{i}"):
                 guide.pop(i)
-                db.save_interview_guide(rid, result.candidate_name, guide)
+                db.save_interview_guide(rid, result.candidate_name, guide, user_id=current_user_id())
                 st.rerun()
         if st.button("➕ Add question", key=f"add_guide_q_{key_prefix}"):
             guide.append({"category": "Custom", "question": ""})
-            db.save_interview_guide(rid, result.candidate_name, guide)
+            db.save_interview_guide(rid, result.candidate_name, guide, user_id=current_user_id())
             st.rerun()
         guide_txt = interview_questions.format_questions_text(result.candidate_name, req_title, guide)
         st.download_button("⬇ Download interview guide", data=guide_txt,
@@ -892,7 +937,7 @@ def candidate_profile_dialog(rid, result):
                   disabled=(to_email == "Not detected")):
         success, message = email_automation.send_email_smtp(st.session_state["smtp_config"], to_email, subject, body)
         st.session_state["email_log"].setdefault(guide_key, []).append(message)
-        db.save_email_log(rid, result.candidate_name, message)
+        db.save_email_log(rid, result.candidate_name, message, user_id=current_user_id())
         if success:
             st.success(message)
         else:
@@ -970,7 +1015,21 @@ def page_candidates():
         st.info("No candidates screened yet for this requisition. Go to **Resume Upload** to run AI screening.")
         return
 
-    st.markdown(f"**{len(results)} candidates analyzed** for *{reqs[rid]['title']}*")
+    engines_used = {r.semantic_engine for r in results} if results else set()
+    if "embeddings" in engines_used:
+        engine_chip = '<span style="background:rgba(16,185,129,0.15);color:#10b981;padding:3px 10px;border-radius:12px;font-size:0.76rem;font-weight:600;border:1px solid rgba(16,185,129,0.35);">🧠 all-MiniLM-L6-v2</span>'
+    elif any("tfidf" in e for e in engines_used):
+        engine_chip = '<span style="background:rgba(245,158,11,0.15);color:#f59e0b;padding:3px 10px;border-radius:12px;font-size:0.76rem;font-weight:600;border:1px solid rgba(245,158,11,0.35);">⚡ TF-IDF Fallback Active</span>'
+    else:
+        engine_chip = ''
+
+    st.markdown(
+        f'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">'
+        f'<div><b>{len(results)} candidates analyzed</b> for <i>{html.escape(reqs[rid]["title"])}</i></div>'
+        f'<div>{engine_chip}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
     search = st.text_input("🔍 Search candidate name or skill", "")
     tabs = st.tabs(["All", "Strong Match", "Good Match", "Review", "Low Match", "Shortlisted"])
@@ -1010,9 +1069,10 @@ def page_candidates():
                 cols[2].markdown(f"**{r.overall_score:.0f}**/100")
                 cols[3].markdown(styling.status_badge_html(r.status), unsafe_allow_html=True)
                 cols[4].write(f"{r.years_experience:.0f} yrs")
-                action = st.session_state["candidate_actions"].get((rid, r.candidate_id), "—")
+                cid = r.candidate_id or f"cand_{i}"
+                action = st.session_state["candidate_actions"].get((rid, cid), st.session_state["candidate_actions"].get((rid, r.candidate_name), "—"))
                 cols[5].write(action)
-                if cols[6].button("View Profile", key=f"view_{rid}_{r.candidate_id}_{label}"):
+                if cols[6].button("View Profile", key=f"view_{rid}_{label}_{i}_{cid}"):
                     candidate_profile_dialog(rid, r)
 
     st.markdown("---")
@@ -1068,6 +1128,10 @@ def candidate_comparison_panel(rid, results):
     st.markdown('<div class="tiq-card"><h4>🆚 Compare Candidates</h4>'
                 '<p style="color:#6b7290;">Pick 2 or 3 candidates to compare head-to-head.</p>',
                 unsafe_allow_html=True)
+
+    for idx, r in enumerate(results, start=1):
+        if not getattr(r, "candidate_id", None):
+            r.candidate_id = f"cand_{idx}_{re.sub(r'[^a-zA-Z0-9_]', '_', r.candidate_name)}"
 
     by_id = {r.candidate_id: r for r in results}
     labels = {r.candidate_id: f"{r.candidate_name} ({r.overall_score:.0f}/100)" for r in results}
@@ -1215,7 +1279,7 @@ def page_requisition():
                 "created_at": dt.datetime.now(),
             }
             st.session_state["requisitions"][rid] = req_data
-            db.save_requisition(req_data)
+            db.save_requisition(req_data, user_id=current_user_id())
             st.session_state["active_req_id"] = rid
             st.success(f"Requisition **{title}** created with {len(parsed['required_skills'])} auto-detected required skills. "
                        f"Head to **Resume Upload** to start screening.")
@@ -1498,7 +1562,7 @@ def page_settings():
         settings_store.save_app_prefs(prefs, current_user_id())
         st.toast("Preference saved — applies from the next new session.")
     if st.button("🗑 Reset all data (Clear Supabase & Session)"):
-        db.reset_all_data()
+        db.reset_all_data(user_id=current_user_id())
         for key in ["requisitions", "results", "candidate_actions", "active_req_id", "req_counter",
                     "last_run_at", "jd_draft_text", "interview_guides", "email_log",
                     "upload_req_selector", "cand_req_selector",

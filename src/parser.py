@@ -7,6 +7,7 @@ from free-form resume or job-description text.
 """
 import io
 import re
+import datetime
 from dataclasses import dataclass, field
 
 from .skills_taxonomy import MASTER_SKILLS, SYNONYMS, SKILL_TO_CATEGORY, canonicalize
@@ -50,9 +51,16 @@ EDUCATION_LEVELS = [
     ("master", "Master's Degree"),
     ("mba", "Master's Degree"),
     ("m.s.", "Master's Degree"),
+    ("ms", "Master's Degree"),
+    ("m.a.", "Master's Degree"),
+    ("ma", "Master's Degree"),
     ("bachelor", "Bachelor's Degree"),
     ("b.s.", "Bachelor's Degree"),
     ("b.tech", "Bachelor's Degree"),
+    ("bsc", "Bachelor's Degree"),
+    ("b.sc", "Bachelor's Degree"),
+    ("b.a.", "Bachelor's Degree"),
+    ("ba", "Bachelor's Degree"),
     ("associate", "Associate Degree"),
     ("diploma", "Diploma"),
     ("high school", "High School"),
@@ -295,7 +303,7 @@ def extract_years_experience(text: str) -> float:
         if start_match:
             start_year = int(start_match.group(0))
             if "present" in span_text.lower() or "current" in span_text.lower():
-                end_year = 2026
+                end_year = datetime.date.today().year
             else:
                 all_years = re.findall(r"(?:19|20)\d{2}", span_text)
                 end_year = int(all_years[-1]) if len(all_years) > 1 else start_year
@@ -338,6 +346,19 @@ def extract_skills(text: str, extra_skills: list = None) -> list:
         pattern = r"(?<![a-z0-9])" + re.escape(skill.lower()) + r"(?![a-z0-9])"
         if re.search(pattern, low):
             found.add(skill)
+
+    # Heuristic: Extract capitalized tokens from "Skills" or "Technologies" sections
+    skills_section_re = re.compile(r"(?:skills|technologies)[\s]*:[\s]*(.*?)(?:\n\n|\Z)", re.IGNORECASE | re.DOTALL)
+    for match in skills_section_re.finditer(text):
+        section_text = match.group(1)
+        # split by commas, bullets, or newlines
+        tokens = re.split(r'[,\n•·|-]', section_text)
+        for token in tokens:
+            cleaned = token.strip()
+            if cleaned and len(cleaned) <= 30 and len(cleaned.split()) <= 3:
+                # only keep it if it has at least one uppercase letter (heuristic for a proper noun/tech)
+                if any(c.isupper() for c in cleaned):
+                    found.add(cleaned)
 
     return sorted(found)
 
