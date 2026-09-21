@@ -19,6 +19,7 @@ so that e.g. a 3-month internship displays as "3 months" instead of "0.3 years" 
 """
 import bisect
 import datetime as _dt
+import hashlib
 import io
 import re
 from dataclasses import dataclass, field
@@ -148,7 +149,7 @@ _EMPLOYER_RE = re.compile(
 )
 
 # ---------------------------------------------------------------------------
-# Resume section headings
+# Resume section headings (Regex-based & Pattern-driven)
 # ---------------------------------------------------------------------------
 _EXPERIENCE_HEADINGS = {
     "experience", "work experience", "professional experience", "work history",
@@ -184,6 +185,56 @@ _OTHER_HEADINGS = {
     "selected publications", "leadership roles", "community service",
 }
 
+# Regex patterns for flexible section classification
+_EXPERIENCE_HEADING_RE = re.compile(
+    r"\b(?:experience|work|employment|career|background|history|intern(?:s|ship|ships)?|co-?op)\b",
+    re.IGNORECASE,
+)
+_EDUCATION_HEADING_RE = re.compile(
+    r"\b(?:education|academic|degree|studied|qualification|qualifications|schooling|academics)\b",
+    re.IGNORECASE,
+)
+_SKILLS_HEADING_RE = re.compile(
+    r"\b(?:skills|competencies|proficiencies|expertise|technologies|tools|tech\s+stack)\b",
+    re.IGNORECASE,
+)
+_OTHER_HEADING_RE = re.compile(
+    r"\b(?:summary|objective|profile|projects?|certificat(?:ion|ions|es)|achievements?|"
+    r"awards?|honors?|honours?|publications?|activities|volunteer(?:ing|s)?|interests?|"
+    r"languages?|affiliations?|references?|coursework|training|declaration|personal\s+details)\b",
+    re.IGNORECASE,
+)
+
+STRUCTURAL_STOP_WORDS = {
+    "certifications", "certification", "certificates", "education",
+    "professional experience", "work experience", "experience", "employment",
+    "career history", "work history", "candidate", "resume", "curriculum vitae",
+    "profile", "summary", "personal profile", "professional summary", "about me",
+    "personal details", "personal information", "projects", "personal projects",
+    "academic projects", "key projects", "skills", "technical skills",
+    "core skills", "key skills", "competencies", "proficiencies", "technologies",
+    "tools", "contact", "contact information", "references", "declaration",
+    "volunteer", "volunteering", "achievements", "awards", "honors",
+    "extracurricular activities", "publications", "coursework", "interests",
+    "hobbies", "languages",
+}
+
+US_STATE_CODES = {
+    "al", "ak", "az", "ar", "ca", "co", "ct", "de", "fl", "ga",
+    "hi", "id", "il", "in", "ia", "ks", "ky", "la", "me", "md",
+    "ma", "mi", "mn", "ms", "mo", "mt", "ne", "nv", "nh", "nj",
+    "nm", "ny", "nc", "nd", "oh", "ok", "or", "pa", "ri", "sc",
+    "sd", "tn", "tx", "ut", "vt", "va", "wa", "wv", "wi", "wy",
+    "dc",
+}
+
+ROLE_TITLE_PATTERNS = re.compile(
+    r"\b(?:senior|junior|lead|principal|staff|associate|chief|director|head|vp|manager|"
+    r"analyst|engineer|developer|scientist|consultant|specialist|intern|trainee|"
+    r"architect|administrator|coordinator|officer|executive|assistant)\b",
+    re.IGNORECASE,
+)
+
 STOPWORD_NAME_LINES = (
     "summary", "objective", "experience", "education", "skills",
     "profile", "resume", "curriculum vitae", "highlights", "accomplishments",
@@ -217,6 +268,9 @@ class ParsedDocument:
     years_experience: float = 0.0
     experience_months: int = 0
     skills: list = field(default_factory=list)
+    parse_confidence: float = 1.0
+    confidence_reasons: list = field(default_factory=list)
+    input_hash: str = ""
 
 
 def clean_doubled_text(text: str) -> str:
@@ -287,6 +341,44 @@ def format_experience(years, months=None, compact=False) -> str:
 # ---------------------------------------------------------------------------
 # File -> text
 # ---------------------------------------------------------------------------
+def _extract_page_text_two_col(page, page_obj):
+    """Detect if page is formatted in two distinct columns. If so, extracts left column
+    then right column to avoid line-interleaved bleeding."""
+    try:
+        width = float(getattr(page, "width", 0))
+        if width < 300:
+            return page_obj.extract_text(x_tolerance=2) or ""
+
+        # Extract words with horizontal positions
+        words = page_obj.extract_words(x_tolerance=2) or []
+        if len(words) < 25:
+            return page_obj.extract_text(x_tolerance=2) or ""
+
+        mid = width / 2.0
+        # Check if there is a clear gutter near the center (between 30% and 70% width)
+        # Count words overlapping the candidate vertical gutters
+        left_words = [w for w in words if w.get("x1", 0) <= mid]
+        right_words = [w for w in words if w.get("x0", 0) >= mid]
+        cross_words = [w for w in words if w.get("x0", 0) < mid and w.get("x1", 0) > mid]
+
+        # If a significant number of words sit clearly on both sides with very few crossing words
+        if len(left_words) >= 15 and len(right_words) >= 15 and len(cross_words) <= 3:
+            # Two-column layout detected! Crop left and right columns
+            left_box = (0, 0, mid, float(page.height))
+            right_box = (mid, 0, width, float(page.height))
+            left_crop = page_obj.crop(left_box)
+            right_crop = page_obj.crop(right_box)
+            left_text = left_crop.extract_text(x_tolerance=2) or ""
+            right_text = right_crop.extract_text(x_tolerance=2) or ""
+            return f"{left_text}\n{right_text}".strip()
+    except Exception:
+        pass
+    try:
+        return page_obj.extract_text(x_tolerance=2) or ""
+    except TypeError:
+        return page_obj.extract_text() or ""
+
+
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     import pdfplumber
     text_chunks = []
@@ -314,11 +406,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
             else:
                 page_to_extract = page
 
-            # x_tolerance=2 stops tightly-kerned (LaTeX) PDFs from gluing words together
-            try:
-                t = page_to_extract.extract_text(x_tolerance=2) or ""
-            except TypeError:
-                t = page_to_extract.extract_text() or ""
+            t = _extract_page_text_two_col(page, page_to_extract)
 
             for hyperlink in getattr(page, "hyperlinks", []):
                 uri = hyperlink.get("uri")
@@ -375,32 +463,52 @@ def extract_text(filename: str, file_bytes: bytes) -> str:
 # Section detection
 # ---------------------------------------------------------------------------
 def _classify_heading(line: str):
-    """Return 'experience' / 'education' / 'other' if line is a resume
-    section heading, else None. Handles compound headings like 'Projects & Internships'."""
-    if len(line) > 60:
+    """Return 'experience' / 'education' / 'skills' / 'other' if line is a resume
+    section heading, else None. Handles compound headings like 'Projects & Internships',
+    and pattern matches non-standard headings."""
+    if not line or len(line) > 70:
         return None
-    norm = re.sub(r"[^a-z&/ ]+", " ", line.lower().replace("-", " "))
+    # Strip trailing punctuation, colons, dashes, bullet points
+    cleaned_line = line.strip(" \t\r\n:–—•·*#-|_")
+    if not cleaned_line:
+        return None
+    norm = re.sub(r"[^a-z&/ ]+", " ", cleaned_line.lower().replace("-", " "))
     norm = re.sub(r"\s+", " ", norm).strip()
     if not norm or len(norm.split()) > 6:
         return None
+
+    # Direct match on common sets first
+    if norm in _EXPERIENCE_HEADINGS:
+        return "experience"
+    if norm in _EDUCATION_HEADINGS:
+        return "education"
+    if norm in _OTHER_HEADINGS:
+        if _SKILLS_HEADING_RE.search(norm):
+            return "skills"
+        return "other"
+
     parts = [p.strip() for p in re.split(r"\s*&\s*|\s*/\s*|\s+and\s+", norm) if p.strip()]
     kinds = []
     for part in parts:
-        if part in _EXPERIENCE_HEADINGS or re.search(r"\b(?:intern(?:s|ship|ships)?)\b", part):
+        if part in _EXPERIENCE_HEADINGS or _EXPERIENCE_HEADING_RE.search(part):
             kinds.append("experience")
-        elif part in _EDUCATION_HEADINGS:
+        elif part in _EDUCATION_HEADINGS or _EDUCATION_HEADING_RE.search(part):
             kinds.append("education")
-        elif part in _OTHER_HEADINGS:
+        elif _SKILLS_HEADING_RE.search(part):
+            kinds.append("skills")
+        elif part in _OTHER_HEADINGS or _OTHER_HEADING_RE.search(part):
             kinds.append("other")
         else:
             return None
     if not kinds:
         return None
-    # If the heading mentions experience/internship, prioritize it
+    # Priority: experience > education > skills > other
     if "experience" in kinds:
         return "experience"
     if "education" in kinds:
         return "education"
+    if "skills" in kinds:
+        return "skills"
     return kinds[0]
 
 
@@ -457,39 +565,65 @@ _MONTH_PAT = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
     r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
 )
+_SEASON_PAT = r"(?:spring|summer|fall|autumn|winter)"
+_SEASON_NUM = {
+    "spring": 3,
+    "summer": 6,
+    "fall": 9,
+    "autumn": 9,
+    "winter": 12,
+}
 _MONTH_NUM = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 }
 _YEAR_PAT = r"(?:19|20)\d{2}"
+_TWO_DIGIT_YEAR_PAT = r"(?:'|’)?\d{2}"
 _SEP_PAT = r"\s*(?:[-–—‒―‑−－]|\bto\b|\buntil\b|\btill\b)\s*"
 _PRESENT_PAT = r"(?:present|current|now|ongoing|today|date)"
 
-# 'Jan 2020 - Mar 2022', '2019 - 2023', '2023 - Present', 'Dec 2013 to Current'
+# 'Jan 2020 - Mar 2022', '2019 - 2023', '2023 - Present', 'Dec 2013 to Current', 'Jun \'18 - Aug \'20'
 _RANGE_FULL_RE = re.compile(
-    rf"(?<![\w/])(?:(?P<sm>{_MONTH_PAT})\.?,?\s*)?(?P<sy>{_YEAR_PAT}){_SEP_PAT}"
-    rf"(?:(?:(?P<em>{_MONTH_PAT})\.?,?\s*)?(?P<ey>{_YEAR_PAT})|(?P<pres>{_PRESENT_PAT}))(?![\w])",
+    rf"(?<![\w/])(?:(?P<sm>{_MONTH_PAT}|{_SEASON_PAT})\.?,?\s*)?(?P<sy>{_YEAR_PAT}|(?:'|’)\d{{2}}){_SEP_PAT}"
+    rf"(?:(?:(?P<em>{_MONTH_PAT}|{_SEASON_PAT})\.?,?\s*)?(?P<ey>{_YEAR_PAT}|(?:'|’)\d{{2}})|(?P<pres>{_PRESENT_PAT}))(?![\w])",
     re.IGNORECASE,
 )
 # 'July-July 2025', 'Jun - Aug 2024' (year written once, at the end)
 _RANGE_MONTHS_RE = re.compile(
-    rf"(?<![\w/])(?P<sm>{_MONTH_PAT})\.?{_SEP_PAT}(?P<em>{_MONTH_PAT})\.?,?\s*(?P<y>{_YEAR_PAT})(?![\w])",
+    rf"(?<![\w/])(?P<sm>{_MONTH_PAT})\.?{_SEP_PAT}(?P<em>{_MONTH_PAT})\.?,?\s*(?P<y>{_YEAR_PAT}|(?:'|’)\d{{2}})(?![\w])",
     re.IGNORECASE,
 )
-# '06/2013 to 09/2013', '12/2015 - Current'
+# '06/2013 to 09/2013', '12/2015 - Current', '01/2021', '06/18 - 12/20'
 _RANGE_NUMERIC_RE = re.compile(
-    rf"(?<![\w/])(?P<sm>0?[1-9]|1[0-2])\s*[/.]\s*(?P<sy>{_YEAR_PAT}){_SEP_PAT}"
-    rf"(?:(?P<em>0?[1-9]|1[0-2])\s*[/.]\s*(?P<ey>{_YEAR_PAT})|(?P<pres>{_PRESENT_PAT}))(?![\w])",
+    rf"(?<![\w/])(?P<sm>0?[1-9]|1[0-2])\s*[/.]\s*(?P<sy>{_YEAR_PAT}|\d{{2}}){_SEP_PAT}"
+    rf"(?:(?P<em>0?[1-9]|1[0-2])\s*[/.]\s*(?P<ey>{_YEAR_PAT}|\d{{2}})|(?P<pres>{_PRESENT_PAT}))(?![\w])",
     re.IGNORECASE,
 )
+
+
+def _normalize_year(yr_str: str) -> int:
+    if not yr_str:
+        return None
+    cleaned = yr_str.strip("'’ ")
+    if len(cleaned) == 4 and cleaned.isdigit():
+        return int(cleaned)
+    if len(cleaned) == 2 and cleaned.isdigit():
+        val = int(cleaned)
+        curr_yr = _dt.date.today().year
+        cutoff = (curr_yr % 100) + 1
+        return (2000 + val) if val <= cutoff else (1900 + val)
+    return int(cleaned) if cleaned.isdigit() else None
 
 
 def _month_num(token):
     if not token:
         return None
-    if token.isdigit():
-        return int(token)
-    return _MONTH_NUM.get(token[:3].lower())
+    token_str = token.strip().lower()
+    if token_str.isdigit():
+        return int(token_str)
+    if token_str in _SEASON_NUM:
+        return _SEASON_NUM[token_str]
+    return _MONTH_NUM.get(token_str[:3])
 
 
 def _find_ranges(text: str):
@@ -497,16 +631,17 @@ def _find_ranges(text: str):
     for every date range in text, without overlapping matches."""
     found = []
     for m in _RANGE_FULL_RE.finditer(text):
-        found.append((m, (int(m["sy"]), _month_num(m["sm"]),
-                          int(m["ey"]) if m["ey"] else None,
-                          _month_num(m["em"]), bool(m["pres"]))))
+        sy = _normalize_year(m["sy"])
+        ey = _normalize_year(m["ey"]) if m["ey"] else None
+        found.append((m, (sy, _month_num(m["sm"]), ey, _month_num(m["em"]), bool(m["pres"]))))
     for m in _RANGE_MONTHS_RE.finditer(text):
-        sm, em, y = _month_num(m["sm"]), _month_num(m["em"]), int(m["y"])
-        found.append((m, (y if sm <= em else y - 1, sm, y, em, False)))
+        sm, em = _month_num(m["sm"]), _month_num(m["em"])
+        y = _normalize_year(m["y"])
+        found.append((m, (y if (sm and em and sm <= em) else y - 1, sm, y, em, False)))
     for m in _RANGE_NUMERIC_RE.finditer(text):
-        found.append((m, (int(m["sy"]), _month_num(m["sm"]),
-                          int(m["ey"]) if m["ey"] else None,
-                          _month_num(m["em"]), bool(m["pres"]))))
+        sy = _normalize_year(m["sy"])
+        ey = _normalize_year(m["ey"]) if m["ey"] else None
+        found.append((m, (sy, _month_num(m["sm"]), ey, _month_num(m["em"]), bool(m["pres"]))))
 
     found.sort(key=lambda item: (item[0].start(), -(item[0].end() - item[0].start())))
     last_end = -1
@@ -518,20 +653,32 @@ def _find_ranges(text: str):
 
 
 def _interval(sy, sm, ey, em, is_present, now):
-    """Month-index interval [start, end) or None. Future dates are clamped to
-    today so '2023-2027' style ranges can never inflate experience."""
+    """Month-index interval [start, end) or None.
+    - Normalizes dates to month/year precision.
+    - If a range has only years (no months), uses January of start year and December of end year.
+    - Merges overlapping or adjacent intervals.
+    - Future dates are clamped to today so '2023-2027' cannot inflate experience.
+    """
+    if not sy:
+        return None
     now_idx = now.year * 12 + now.month - 1
+    # If role has start month use it, else default to January
     start = sy * 12 + ((sm or 1) - 1)
+
     if is_present:
         end = now_idx + 1
     elif em:
-        end = ey * 12 + em                 # end month is inclusive
+        end = ey * 12 + em                 # end month is inclusive (1-12)
     elif sm:
-        end = ey * 12 + (sm - 1)           # "Jun 2019 - 2021": same month, 2 years on
-    else:
-        end = ey * 12                      # "2019 - 2023": whole years between
+        end = (ey if ey else sy) * 12 + (sm - 1)
+    elif ey:
+        # Range has only years (e.g. 2021 - 2023) -> whole years between (ey - sy)
+        end = ey * 12
         if ey == sy:
-            end = start + 12               # a lone-year range like "2021 - 2021"
+            end = start + 12
+    else:
+        end = start + 12
+
     if is_present:
         end = min(end, now_idx + 1)
     elif start <= now_idx:
@@ -982,18 +1129,97 @@ def extract_education(text: str, mode: str = "highest") -> str:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Location & Contact Block Filtering
+# ---------------------------------------------------------------------------
+LOCATION_RE = re.compile(
+    r"\b(?:[A-Z][a-zA-Z\s.-]+,\s*(?:[A-Z]{2}|[A-Za-z\s]+)(?:\s+\d{5}(?:-\d{4})?)?|remote|hybrid|on-?site|relocate)\b",
+    re.IGNORECASE,
+)
+
+COMMON_ENGLISH_STOPWORDS = {
+    "and", "with", "for", "the", "of", "to", "in", "at", "by", "on", "from",
+    "as", "an", "a", "or", "is", "are", "was", "were", "be", "been", "using",
+    "such", "into", "through", "across", "candidate", "resume", "curriculum", "vitae",
+}
+
+SINGLE_LETTER_WHITELIST = {"c", "r"}
+
+
+def _is_valid_skill_token(token: str, in_skills_section: bool = False, full_text: str = "") -> bool:
+    """Filter out leaked headers, US state codes, single-letter junk, role titles, and common fragments."""
+    if not token:
+        return False
+    raw = token.strip()
+    low = raw.lower().strip(".,:;()[]{}*#-–—/|")
+    if not low:
+        return False
+
+    # Never emit structural stop words (headers, sections)
+    if low in STRUCTURAL_STOP_WORDS:
+        return False
+    if any(low == s or low.startswith(s + " ") or low.endswith(" " + s) for s in STRUCTURAL_STOP_WORDS):
+        return False
+
+    # English stopword fragments
+    if low in COMMON_ENGLISH_STOPWORDS:
+        return False
+
+    # Single-character tokens: only 'c' or 'r' inside a Skills section or with explicit language context
+    if len(low) == 1:
+        if low not in SINGLE_LETTER_WHITELIST:
+            return False
+        if not in_skills_section:
+            # Check if text has "c/c++", "c, python", "r programming", etc.
+            ctx_pat = rf"\b{re.escape(low)}\s*[/,]\s*(?:c\+\+|python|java|sql)|(?:language|programming|software)\s*:\s*.*?\b{re.escape(low)}\b"
+            if not re.search(ctx_pat, full_text or "", re.IGNORECASE):
+                return False
+
+    # Two-letter tokens matching US State codes (TX, CA, NY...) unless explicitly in taxonomy (like Go)
+    if len(low) == 2 and low in US_STATE_CODES:
+        if low not in ("go", "ai", "ui", "ux", "ts", "js", "pm", "qa", "hr"):
+            return False
+
+    # Job title vs skill disambiguation: If token is a job title phrase
+    if ROLE_TITLE_PATTERNS.search(low):
+        # Exclude pure role titles like 'Senior Data Analyst', 'Data Analyst', 'Software Engineer'
+        # unless it is a specific recognized discipline skill in taxonomy (e.g. 'Data Analysis' is skill, 'Data Analyst' is title)
+        if any(role_word in low for role_word in ("analyst", "engineer", "manager", "developer", "scientist", "consultant", "specialist", "intern", "director", "lead", "architect")):
+            if low not in ("data engineering", "mechanical design", "electrical engineering", "quality assurance"):
+                return False
+
+    # Location / Contact / Metadata words
+    if low in ("austin", "texas", "california", "new york", "remote", "hybrid", "on-site", "not detected", "email", "phone"):
+        return False
+
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Skills Extraction
 # ---------------------------------------------------------------------------
 def extract_skills(text: str, extra_skills: list = None) -> list:
-    """extra_skills lets callers extend the built-in taxonomy at runtime
-    without editing skills_taxonomy.py."""
-    low = " " + re.sub(r"[^a-z0-9.+#/\s]", " ", text.lower()) + " "
+    """Extract skills with strict boundary enforcement, synonym canonicalization,
+    header stop-list rejection, short token filtering, and title disambiguation."""
+    if not text:
+        return []
+
+    # Strip contact block (top portion before first substantive header or contact items)
+    cleaned_text = EMAIL_RE.sub(" ", text)
+    cleaned_text = PHONE_RE.sub(" ", cleaned_text)
+    cleaned_text = URL_RE.sub(" ", cleaned_text)
+
+    low = " " + re.sub(r"[^a-z0-9.+#/\s-]", " ", cleaned_text.lower()) + " "
     found = set()
 
     for skill in MASTER_SKILLS:
-        pattern = r"(?<![a-z0-9])" + re.escape(skill.lower()) + r"(?![a-z0-9])"
+        skill_clean = skill.strip()
+        skill_low = skill_clean.lower()
+        if not _is_valid_skill_token(skill_clean, in_skills_section=True, full_text=text):
+            continue
+        pattern = r"(?<![a-z0-9])" + re.escape(skill_low) + r"(?![a-z0-9])"
         if re.search(pattern, low):
-            found.add(skill)
+            found.add(canonicalize(skill_clean))
 
     for alias, canonical in SYNONYMS.items():
         pattern = r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])"
@@ -1001,25 +1227,73 @@ def extract_skills(text: str, extra_skills: list = None) -> list:
             found.add(canonical)
 
     for skill in (extra_skills or []):
-        skill = skill.strip()
-        if not skill:
+        skill_clean = skill.strip()
+        if not skill_clean or not _is_valid_skill_token(skill_clean, in_skills_section=True, full_text=text):
             continue
-        pattern = r"(?<![a-z0-9])" + re.escape(skill.lower()) + r"(?![a-z0-9])"
+        pattern = r"(?<![a-z0-9])" + re.escape(skill_clean.lower()) + r"(?![a-z0-9])"
         if re.search(pattern, low):
-            found.add(skill)
+            found.add(canonicalize(skill_clean))
 
-    # Heuristic: Extract capitalized tokens from 'Skills' or 'Technologies' sections
-    skills_section_re = re.compile(r"(?:skills|technologies)[\s]*:[\s]*(.*?)(?:\n\n|\Z)", re.IGNORECASE | re.DOTALL)
-    for match in skills_section_re.finditer(text):
-        section_text = match.group(1)
-        tokens = re.split(r'[,\n•·|-]', section_text)
+    # Dedicated Skills Sections extraction
+    skills_sec_text = _section_text(text, "skills") or ""
+    if not skills_sec_text:
+        match = re.search(r"(?:skills|technologies|proficiencies|tech\s+stack)[\s]*:[\s]*(.*?)(?:\n\n|\Z)", text, re.IGNORECASE | re.DOTALL)
+        if match:
+            skills_sec_text = match.group(1)
+
+    if skills_sec_text:
+        tokens = re.split(r'[,\n•·|;/]', skills_sec_text)
         for token in tokens:
-            cleaned = token.strip()
-            if cleaned and len(cleaned) <= 30 and len(cleaned.split()) <= 3:
-                if any(c.isupper() for c in cleaned):
-                    found.add(cleaned)
+            token = token.strip()
+            if not token or len(token) > 35 or len(token.split()) > 3:
+                continue
+            if _is_valid_skill_token(token, in_skills_section=True, full_text=text):
+                canon = canonicalize(token)
+                if _is_valid_skill_token(canon, in_skills_section=True, full_text=text):
+                    found.add(canon)
 
     return sorted(found)
+
+
+# ---------------------------------------------------------------------------
+# Parse Confidence Scoring
+# ---------------------------------------------------------------------------
+def compute_parse_confidence(doc: ParsedDocument, raw_text: str) -> tuple:
+    """Calculate parse confidence score (0.0 to 1.0) and explanatory reasons."""
+    reasons = []
+    score = 0.0
+
+    # 1. Contact information detection
+    has_contact = False
+    if doc.email and doc.email != "Not detected":
+        score += 0.20
+        has_contact = True
+    if doc.phone and doc.phone != "Not detected":
+        score += 0.15
+        has_contact = True
+    if not has_contact:
+        reasons.append("No verified email or phone detected.")
+
+    # 2. Section detection coverage
+    sections = _split_sections(raw_text)
+    section_kinds = {k for k, lines in sections if lines}
+    if "experience" in section_kinds or doc.years_experience > 0:
+        score += 0.25
+    else:
+        reasons.append("No distinct Experience section or dated roles identified.")
+
+    if "education" in section_kinds or (doc.education and doc.education != "Not detected"):
+        score += 0.20
+    else:
+        reasons.append("No explicit Education section or degree identified.")
+
+    if "skills" in section_kinds or len(doc.skills) >= 3:
+        score += 0.20
+    else:
+        reasons.append("Fewer than 3 skills identified.")
+
+    confidence = round(min(max(score, 0.0), 1.0), 2)
+    return confidence, reasons
 
 
 # ---------------------------------------------------------------------------
@@ -1034,22 +1308,62 @@ def parse_document(filename: str, file_bytes: bytes, extra_skills: list = None) 
     social_links = extract_social_links(text)
     exp_months = extract_experience_months(text)
     years_exp = extract_years_experience(text)
+    skills = extract_skills(text, extra_skills=extra_skills)
+    edu = extract_education(text)
 
-    return ParsedDocument(
+    input_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+    doc = ParsedDocument(
         raw_text=text,
         name=guess_name(text, fallback_name),
         email=email,
         phone=phone if phone else "Not detected",
         **social_links,
-        education=extract_education(text),
+        education=edu,
         years_experience=years_exp,
         experience_months=exp_months,
-        skills=extract_skills(text, extra_skills=extra_skills),
+        skills=skills,
+        input_hash=input_hash,
     )
+
+    conf_score, conf_reasons = compute_parse_confidence(doc, text)
+    doc.parse_confidence = conf_score
+    doc.confidence_reasons = conf_reasons
+    return doc
 
 
 def parse_job_description(jd_text: str, min_years_override=None, extra_skills: list = None) -> dict:
-    skills = extract_skills(jd_text, extra_skills=extra_skills)
+    """Parse JD text into required skills, preferred skills, experience, and education."""
+    all_skills = extract_skills(jd_text, extra_skills=extra_skills)
+
+    # Distinguish Required vs. Preferred qualifications
+    req_match = re.search(
+        r"(?:required|minimum|basic qualifications?|what you('ll| will) need|must have)[:\s]*(.*?)(?=(?:preferred|nice to have|bonus|desired|additional qualifications?)\b|\Z)",
+        jd_text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    pref_match = re.search(
+        r"(?:preferred|nice to have|bonus|desired|additional qualifications?)[:\s]*(.*?)(?=(?:required|benefits|about us|responsibilities)\b|\Z)",
+        jd_text,
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    if req_match or pref_match:
+        req_text = req_match.group(1) if req_match else ""
+        pref_text = pref_match.group(1) if pref_match else ""
+        req_skills = extract_skills(req_text, extra_skills=extra_skills)
+        pref_skills = extract_skills(pref_text, extra_skills=extra_skills)
+
+        # In case a skill was in both, assign to required
+        pref_skills = [s for s in pref_skills if s not in req_skills]
+        # Any remaining skills not in pref belong to required
+        for s in all_skills:
+            if s not in pref_skills and s not in req_skills:
+                req_skills.append(s)
+    else:
+        req_skills = all_skills
+        pref_skills = []
+
     years_match = YEARS_EXP_RE.search(jd_text)
     min_years = float(years_match.group(1)) if years_match else (min_years_override or 0.0)
     if not min_years:
@@ -1058,9 +1372,11 @@ def parse_job_description(jd_text: str, min_years_override=None, extra_skills: l
             min_years = round(int(months_match.group(1)) / 12, 2)
     education = extract_education(jd_text, mode="lowest")
     is_internship = bool(re.search(r"\b(?:intern(?:s|ship|ships)?|trainee)\b", jd_text, re.IGNORECASE))
+
     return {
         "raw_text": jd_text,
-        "required_skills": skills,
+        "required_skills": sorted(req_skills),
+        "preferred_skills": sorted(pref_skills),
         "min_years": min_years,
         "required_education": education,
         "is_internship": is_internship,

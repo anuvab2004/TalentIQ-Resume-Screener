@@ -29,6 +29,7 @@ SKILL_CATEGORIES = {
         "OpenCV", "Hugging Face", "LLM", "Generative AI", "MLOps",
         "Big Data", "Apache Spark", "Hadoop", "ETL", "Data Warehousing",
         "Power BI", "Tableau", "Looker", "Excel", "A/B Testing",
+        "Snowflake", "dbt", "Databricks",
     ],
     "Cloud & DevOps": [
         "AWS", "Amazon Web Services", "Azure", "Google Cloud Platform", "GCP",
@@ -179,6 +180,15 @@ SYNONYMS = {
     "gen ai": "Generative AI",
     "llms": "LLM",
     "large language models": "LLM",
+    "split testing": "A/B Testing",
+    "a/b test": "A/B Testing",
+    "ab testing": "A/B Testing",
+    "stakeholder collaboration": "Stakeholder Management",
+    "stakeholder communication": "Stakeholder Management",
+    "cross-functional leadership": "Cross-functional Collaboration",
+    "cross functional collaboration": "Cross-functional Collaboration",
+    "cross-functional teams": "Cross-functional Collaboration",
+    "snow flake": "Snowflake",
 }
 
 def canonicalize(term: str) -> str:

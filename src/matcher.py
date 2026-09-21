@@ -20,6 +20,7 @@ Semantic Relevance has two backends:
                     every call transparently falls back to TF-IDF.
 """
 import hashlib
+import re
 from dataclasses import dataclass, field
 
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -238,17 +239,86 @@ def semantic_relevance(resume_text: str, jd_text: str, backend: str = "auto") ->
     return _semantic_relevance_tfidf(resume_text, jd_text), "tfidf"
 
 
-def _skill_alignment(candidate_skills, required_skills):
+# Trigger -> skill inference map for context in bullets
+BULLET_SKILL_TRIGGERS = {
+    "ab test": "A/B Testing",
+    "split test": "A/B Testing",
+    "user research": "User Research",
+    "wireframe": "Wireframing",
+    "prototype": "Prototyping",
+    "continuous integration": "CI/CD",
+    "continuous deployment": "CI/CD",
+    "data pipeline": "Data Engineering",
+    "etl pipeline": "ETL",
+    "microservice": "Microservices",
+    "rest api": "REST API",
+    "restful": "REST API",
+    "regression": "Statistics",
+    "classification": "Machine Learning",
+    "neural network": "Deep Learning",
+    "deep learning": "Deep Learning",
+    "kubernetes cluster": "Kubernetes",
+    "docker container": "Docker",
+    "terraform": "Terraform",
+    "cross-functional": "Cross-functional Collaboration",
+    "stakeholder": "Stakeholder Management",
+}
+
+
+def infer_skills_from_context(resume_text: str, target_skills: list) -> set:
+    """Infer candidate skills from action bullet context for target skills."""
+    if not resume_text or not target_skills:
+        return set()
+    low_text = resume_text.lower()
+    inferred = set()
+    target_low_map = {s.lower(): s for s in target_skills}
+
+    for trigger, skill in BULLET_SKILL_TRIGGERS.items():
+        if skill.lower() in target_low_map:
+            if re.search(r"\b" + re.escape(trigger) + r"\b", low_text):
+                inferred.add(target_low_map[skill.lower()])
+    return inferred
+
+
+def _skill_alignment(candidate_skills, required_skills, preferred_skills=None, resume_text=""):
+    preferred_skills = preferred_skills or []
     cand_set = {s.lower() for s in candidate_skills}
+
+    # Infer target skills mentioned in bullets
+    all_target = list(required_skills) + list(preferred_skills)
+    inferred = infer_skills_from_context(resume_text, all_target)
+    for inf in inferred:
+        cand_set.add(inf.lower())
+
     req_set = {s.lower() for s in required_skills}
-    if not req_set:
-        # No explicit skills detected in the JD -> neutral score, don't punish.
-        return 100.0, list(candidate_skills), [], list(candidate_skills)
-    matched = [s for s in required_skills if s.lower() in cand_set]
-    missing = [s for s in required_skills if s.lower() not in cand_set]
-    extra = [s for s in candidate_skills if s.lower() not in req_set]
-    score = round(len(matched) / len(req_set) * 100, 1)
-    return score, matched, missing, extra
+    pref_set = {s.lower() for s in preferred_skills}
+
+    if not req_set and not pref_set:
+        return 100.0, list(candidate_skills), [], list(candidate_skills), 100.0, 100.0
+
+    # Required match
+    matched_req = [s for s in required_skills if s.lower() in cand_set]
+    missing_req = [s for s in required_skills if s.lower() not in cand_set]
+    req_score = round(len(matched_req) / len(req_set) * 100, 1) if req_set else 100.0
+
+    # Preferred match
+    matched_pref = [s for s in preferred_skills if s.lower() in cand_set]
+    missing_pref = [s for s in preferred_skills if s.lower() not in cand_set]
+    pref_score = round(len(matched_pref) / len(pref_set) * 100, 1) if pref_set else 100.0
+
+    # Combined score: Required weighted 80%, Preferred 20%
+    if pref_set and req_set:
+        final_score = round(0.80 * req_score + 0.20 * pref_score, 1)
+    elif req_set:
+        final_score = req_score
+    else:
+        final_score = pref_score
+
+    all_matched = matched_req + [s for s in matched_pref if s not in matched_req]
+    all_missing = missing_req + [s for s in missing_pref if s not in missing_req]
+    extra = [s for s in candidate_skills if s.lower() not in req_set and s.lower() not in pref_set]
+
+    return final_score, all_matched, all_missing, extra, req_score, pref_score
 
 
 def _experience_evidence(candidate_years: float, min_years: float, is_internship: bool = False, candidate_months: int = 0) -> float:
@@ -313,8 +383,12 @@ def _build_rationale(candidate_name, matched, missing, factors, status, experien
 def score_candidate(parsed_resume, parsed_jd, filename="", semantic_backend="auto", weights=None) -> MatchResult:
     weights = weights or WEIGHTS
     semantic, engine_used = semantic_relevance(parsed_resume.raw_text, parsed_jd["raw_text"], backend=semantic_backend)
-    skill_score, matched, missing, extra = _skill_alignment(
-        parsed_resume.skills, parsed_jd["required_skills"]
+    pref_skills = parsed_jd.get("preferred_skills", [])
+    skill_score, matched, missing, extra, req_match_sc, pref_match_sc = _skill_alignment(
+        parsed_resume.skills,
+        parsed_jd.get("required_skills", []),
+        preferred_skills=pref_skills,
+        resume_text=parsed_resume.raw_text,
     )
     exp_months = getattr(parsed_resume, "experience_months", 0)
     is_intern = parsed_jd.get("is_internship", False)
@@ -331,6 +405,8 @@ def score_candidate(parsed_resume, parsed_jd, filename="", semantic_backend="aut
         "skill_alignment": skill_score,
         "experience_evidence": exp_score,
         "education_evidence": edu_score,
+        "required_match_score": req_match_sc,
+        "preferred_match_score": pref_match_sc,
     }
 
     overall = round(
@@ -459,9 +535,12 @@ def score_candidates_batch(
         # -----------------------------------------------------
         # Skill matching
         # -----------------------------------------------------
-        skill_score, matched, missing, extra = _skill_alignment(
+        batch_pref_skills = parsed_jd.get("preferred_skills", [])
+        skill_score, matched, missing, extra, req_sc, pref_sc = _skill_alignment(
             parsed_resume.skills,
-            parsed_jd["required_skills"],
+            parsed_jd.get("required_skills", []),
+            preferred_skills=batch_pref_skills,
+            resume_text=parsed_resume.raw_text,
         )
 
         # -----------------------------------------------------
@@ -489,6 +568,8 @@ def score_candidates_batch(
             "skill_alignment": skill_score,
             "experience_evidence": exp_score,
             "education_evidence": edu_score,
+            "required_match_score": req_sc,
+            "preferred_match_score": pref_sc,
         }
 
         # -----------------------------------------------------
