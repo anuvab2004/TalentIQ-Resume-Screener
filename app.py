@@ -22,7 +22,7 @@ from src.matcher import (
     embeddings_available,
     WEIGHTS,
 )
-from src.parser import extract_social_link_labels, extract_social_links, parse_document, parse_job_description
+from src.parser import extract_social_link_labels, extract_social_links, format_experience, format_years, parse_document, parse_job_description
 try:
     from src.parser import clean_doubled_text
 except (ImportError, AttributeError):
@@ -931,7 +931,7 @@ def candidate_profile_dialog(rid, result):
         st.write(f"{label} — **{val:.0f}%**")
         st.progress(min(max(val / 100, 0), 1.0))
 
-    st.caption(f"Education: {result.education}  ·  Experience: {result.years_experience:.0f} years")
+    st.caption(f"Education: {result.education}  ·  Experience: {format_experience(result.years_experience, getattr(result, 'experience_months', None))}")
 
     st.markdown("##### Why This Match")
     st.write(result.rationale)
@@ -1071,7 +1071,7 @@ def build_profile_text(result):
         f"GitHub: {_social_url(result, 'github_url')}",
         f"Portfolio: {_social_url(result, 'portfolio_url')}",
         f"Education: {result.education}",
-        f"Experience: {result.years_experience:.0f} years",
+        f"Experience: {format_experience(result.years_experience, getattr(result, 'experience_months', None))}",
         f"",
         f"Overall Match Score: {result.overall_score}/100 ({result.status})",
         f"",
@@ -1214,7 +1214,7 @@ def page_candidates():
                     )
                 cols[2].markdown(f"**{r.overall_score:.0f}**/100")
                 cols[3].markdown(styling.status_badge_html(r.status), unsafe_allow_html=True)
-                cols[4].write(f"{r.years_experience:.0f} yrs")
+                cols[4].write(format_experience(r.years_experience, getattr(r, 'experience_months', None), compact=True))
                 cid = r.candidate_id or f"cand_{i}"
                 action = st.session_state["candidate_actions"].get((rid, cid), st.session_state["candidate_actions"].get((rid, r.candidate_name), "—"))
                 cols[5].write(action)
@@ -1252,6 +1252,7 @@ def page_candidates():
         "Skill Alignment": r.factors["skill_alignment"],
         "Experience Evidence": r.factors["experience_evidence"],
         "Education Evidence": r.factors["education_evidence"],
+        "Experience": format_experience(r.years_experience, getattr(r, "experience_months", None)),
         "Experience (yrs)": r.years_experience,
         "Education": r.education,
         "Matched Skills": ", ".join(r.matched_skills),
@@ -1310,7 +1311,7 @@ def candidate_comparison_panel(rid, results):
         {"Metric": "Skill Alignment", **{col_name[c.candidate_id]: f"{c.factors['skill_alignment']:.0f}%" for c in chosen}},
         {"Metric": "Experience Evidence", **{col_name[c.candidate_id]: f"{c.factors['experience_evidence']:.0f}%" for c in chosen}},
         {"Metric": "Education Evidence", **{col_name[c.candidate_id]: f"{c.factors['education_evidence']:.0f}%" for c in chosen}},
-        {"Metric": "Years of Experience", **{col_name[c.candidate_id]: f"{c.years_experience:.0f}" for c in chosen}},
+        {"Metric": "Experience", **{col_name[c.candidate_id]: format_experience(c.years_experience, getattr(c, "experience_months", None)) for c in chosen}},
         {"Metric": "Education", **{col_name[c.candidate_id]: c.education for c in chosen}},
         {"Metric": "Matched Skills (#)", **{col_name[c.candidate_id]: str(len(c.matched_skills)) for c in chosen}},
         {"Metric": "Missing Skills (#)", **{col_name[c.candidate_id]: str(len(c.missing_skills)) for c in chosen}},

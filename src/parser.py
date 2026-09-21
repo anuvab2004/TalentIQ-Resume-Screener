@@ -4,13 +4,26 @@ Document extraction + structured parsing.
 Handles: PDF / DOCX / TXT ingestion, and pulling out
 name, email, phone, education, years of experience, and a skills list
 from free-form resume or job-description text.
+
+Years of experience come from paid/professional work and internships:
+full-time roles, part-time roles, contracts, freelance work and internships.
+A date range is counted only when it:
+  (a) is not inside an Education / Projects / Skills / Certifications /
+      Volunteer / Publications section,
+  (b) is not next to degree or grade wording (B.Tech, M.S., Ph.D, CGPA ...),
+  (c) sits next to a job title, "intern"/"trainee" wording or an employer marker.
+
+Overlapping jobs/internships are merged so they are never double counted.
+Internships and short-duration roles are fully counted and preserved in months,
+so that e.g. a 3-month internship displays as "3 months" instead of "0.3 years" or "0 yrs".
 """
+import bisect
+import datetime as _dt
 import io
 import re
-import datetime
 from dataclasses import dataclass, field
 
-from .skills_taxonomy import MASTER_SKILLS, SYNONYMS, SKILL_TO_CATEGORY, canonicalize
+from .skills_taxonomy import MASTER_SKILLS, SYNONYMS, canonicalize
 
 EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 URL_RE = re.compile(
@@ -26,15 +39,38 @@ URL_RE = re.compile(
 # so it doesn't grab pieces of longer numeric strings (IDs, years, etc.)
 PHONE_RE = re.compile(
     r"(?<![\d/])"
-    r"(?:\(\+?\d{1,4}\)[\s.-]?|\+\d{1,3}[\s.-]?)?"
+    r"(?:\+\d{1,3}[\s.-]?)?"
     r"(?:\(\d{2,4}\)[\s.-]?)?"
     r"\d{3,5}[\s.-]?\d{3,4}(?:[\s.-]?\d{2,4})?"
     r"(?![\d/])"
 )
-YEARS_EXP_RE = re.compile(
-    r"(\d{1,2})\+?\s*(?:years|yrs)\.?\s*(?:of)?\s*(?:relevant\s+)?experience",
+# Labels that mean "the number next to me is an ID, not a phone number".
+PHONE_ID_LABEL_RE = re.compile(
+    r"\b(?:roll|reg(?:istration)?|enrol(?:l?ment)?|student|employee|emp|id|uid|"
+    r"aadhaar|aadhar|pan|passport|ssn|cgpa|gpa|pin\s?code|zip)\b[^\d]{0,12}$",
     re.IGNORECASE,
 )
+
+# "5 years of experience", "5+ yrs hands-on experience", "1.5 years experience",
+# "3-5 years of professional experience" (captures the lower bound).
+YEARS_EXP_RE = re.compile(
+    r"(?<![\d.])(\d{1,2}(?:\.\d)?)(?:\s*(?:-|–|—|to)\s*\d{1,2})?\s*\+?\s*(?:years?|yrs?)\.?\s*(?:of\s+)?"
+    r"(?:(?:relevant|professional|hands-on|industry|work|working|total|overall|proven)\s+)*"
+    r"experience",
+    re.IGNORECASE,
+)
+
+# "3 months internship", "6 mos of experience", "3-month intern", "3 months as intern"
+MONTHS_EXP_RE = re.compile(
+    r"(?<![\d.])(\d{1,2})\s*(?:-|–|—|to)?\s*(?:\d{1,2})?\s*(?:months?|mos?)\.?(?:\s+(?:as\s+(?:an?\s+)?)?|\s*[-–—:]\s*|\s+of\s+)?(?:(?:relevant|professional|hands-on|industry|work|working|total|overall|proven|summer)\s+)*(?:experience|internship|internships|intern|interns|training)",
+    re.IGNORECASE,
+)
+# "intern for 3 months", "Software Engineer Intern (3 months)", "internship: 3 months", "internship of 3 months"
+INTERNSHIP_DURATION_RE = re.compile(
+    r"\b(?:intern(?:s|ship|ships)?|trainee)\b[\s:()–—\-,]{1,25}(?:(?:for|of|duration|period)\s*(?:of|:)?\s*)?(\d{1,2})\s*(?:months?|mos?)\b",
+    re.IGNORECASE,
+)
+
 DATE_RANGE_RE = re.compile(
     r"(19|20)\d{2}\s*(?:-|to|–|—)\s*(?:(19|20)\d{2}|present|current)",
     re.IGNORECASE,
@@ -45,31 +81,127 @@ YEAR_RANGE_LOOKALIKE_RE = re.compile(
     r"^(?:19|20)\d{2}[\s.-]*(?:(?:19|20)\d{2}|present|current)$", re.IGNORECASE
 )
 
-EDUCATION_LEVELS = [
-    ("phd", "PhD / Doctorate"),
-    ("doctorate", "PhD / Doctorate"),
-    ("master", "Master's Degree"),
-    ("mba", "Master's Degree"),
-    ("m.s.", "Master's Degree"),
-    ("ms", "Master's Degree"),
-    ("m.a.", "Master's Degree"),
-    ("ma", "Master's Degree"),
-    ("bachelor", "Bachelor's Degree"),
-    ("b.s.", "Bachelor's Degree"),
-    ("b.tech", "Bachelor's Degree"),
-    ("bsc", "Bachelor's Degree"),
-    ("b.sc", "Bachelor's Degree"),
-    ("b.a.", "Bachelor's Degree"),
-    ("ba", "Bachelor's Degree"),
-    ("associate", "Associate Degree"),
-    ("diploma", "Diploma"),
-    ("high school", "High School"),
+# ---------------------------------------------------------------------------
+# Education patterns
+# ---------------------------------------------------------------------------
+_EDU_PATTERNS = [
+    (r"\bph\.?\s?d\b|\bdoctorate\b|\bdoctoral\b", "PhD / Doctorate"),
+    (
+        r"\bmaster(?:['’]?s)?\s+(?:of|in|degree)\b|\bmaster['’]s\b|\bmasters\b"
+        r"|\bm\s*\.\s*tech\b|\bmtech\b|\bm\s*\.\s*sc\b|\bmsc\b|\bmba\b|\bmca\b"
+        r"|\bm\s*\.\s*s\b|\bm\s*\.\s*e\b|\bm\s*\.\s*a\b",
+        "Master's Degree",
+    ),
+    (
+        r"\bbachelor|\bb\s*\.\s*tech\b|\bbtech\b|\bb\s*\.\s*sc\b|\bbsc\b|\bb\s*\.\s*s\b"
+        r"|\bb\s*\.\s*e\b|\bb\s*\.\s*a\b|\bb\s*\.\s*com\b|\bbcom\b|\bbca\b|\bbba\b",
+        "Bachelor's Degree",
+    ),
+    (r"\bassociate(?:['’]?s)?\s+(?:degree|of)\b", "Associate Degree"),
+    (r"(?<!high school )(?<!school )\bdiplomas?\b", "Diploma"),
+    (
+        r"\bhigh\s+school\b|\bsenior\s+secondary\b|\bhigher\s+secondary\b|\b12th\b|\bhsc\b",
+        "High School",
+    ),
 ]
+EDUCATION_LEVELS = [(re.compile(p, re.IGNORECASE), label) for p, label in _EDU_PATTERNS]
+
+# Words that mean "this date range belongs to a degree, not a job".
+_DEGREE_RE = re.compile(
+    r"\b(?:cgpa|sgpa|gpa|percentage|graduation|dissertation|thesis|scholarship|fellowship)\b|"
+    + "|".join(p for p, label in _EDU_PATTERNS if label != "High School"),
+    re.IGNORECASE,
+)
+_STUDENT_CONTEXT_RE = re.compile(
+    r"\b(?:universit(?:y|ies)|college|institute|school|academy|campus|semester|"
+    r"pursuing|undergraduate|coursework|student)\b",
+    re.IGNORECASE,
+)
+
+# Unpaid roles that carry a title but are not employment.
+_UNPAID_ROLE_RE = re.compile(
+    r"\b(?:volunteer\w*|community\s+service|board\s+of\s+directors|board\s+member|"
+    r"member\s+of\s+the\s+board)\b",
+    re.IGNORECASE,
+)
+
+# Words that mean "this date range belongs to a job or internship".
+_WORK_TITLE_RE = re.compile(
+    r"\b(?:intern(?:s|ship|ships)?|trainees?|apprentice(?:s|ship)?|co-?ops?|engineers?|developers?|"
+    r"dev|sde|swe|programmers?|analysts?|consultants?|managers?|executives?|associates?|"
+    r"officers?|assistants?|administrators?|admin|coordinators?|specialists?|architects?|"
+    r"designers?|scientists?|researchers?|technicians?|technologists?|auditors?|accountants?|"
+    r"advis[eo]rs?|leads?|directors?|supervisors?|representatives?|freelanc(?:e|er|ing)|"
+    r"contractors?|teachers?|lecturers?|professors?|tutors?|instructors?|trainers?|clerks?|"
+    r"secretary|recruiters?|strategists?|generalists?|founders?|co-?founders?|owners?|"
+    r"editors?|writers?|copywriters?|marketers?|salesman|salesperson|sales|cashiers?|"
+    r"receptionists?|operators?|mechanics?|electricians?|drivers?|nurses?|pharmacists?|"
+    r"chefs?|waiters?|baristas?|bankers?|testers?|president|vp|cto|ceo|coo|cfo|qa)\b",
+    re.IGNORECASE,
+)
+_EMPLOYER_RE = re.compile(
+    r"\b(?:pvt|private\s+limited|ltd|limited|inc|llc|llp|corp|corporation|technologies|"
+    r"solutions|systems|labs?|software|consulting|consultancy|services|company|co|gmbh|"
+    r"group|industries|enterprises|bank|studios?|startup|agency|firm|full[\s-]?time|"
+    r"part[\s-]?time|contract|remote|on-?site|hybrid)\b",
+    re.IGNORECASE,
+)
+
+# ---------------------------------------------------------------------------
+# Resume section headings
+# ---------------------------------------------------------------------------
+_EXPERIENCE_HEADINGS = {
+    "experience", "work experience", "professional experience", "work history",
+    "employment", "employment history", "employment experience", "work",
+    "professional background", "career history", "relevant experience",
+    "industry experience", "industrial experience", "industrial training",
+    "intern", "interns", "internship", "internships", "intern experience",
+    "interns experience", "internship experience", "summer intern",
+    "summer internship", "summer internships", "research experience",
+    "teaching experience", "co-op", "coop", "practical training",
+}
+_EDUCATION_HEADINGS = {
+    "education", "academic background", "academics", "academic qualifications",
+    "educational qualifications", "education qualifications", "qualifications",
+    "academic details", "educational background", "education and training",
+}
+_OTHER_HEADINGS = {
+    "summary", "professional summary", "career summary", "objective",
+    "career objective", "profile", "professional profile", "about me", "about",
+    "projects", "personal projects", "academic projects", "key projects",
+    "selected projects", "project experience", "skills", "technical skills",
+    "core skills", "key skills", "interests", "areas of interest", "hobbies",
+    "languages", "language", "certifications", "certification", "certificates",
+    "achievements", "accomplishments", "awards", "honors", "honours",
+    "extra curricular activities", "extracurricular activities",
+    "co curricular activities", "activities", "volunteer experience",
+    "volunteering", "volunteer work", "leadership", "leadership experience",
+    "positions of responsibility", "publications", "research papers",
+    "references", "declaration", "personal details", "personal information",
+    "training", "courses", "coursework", "relevant coursework", "workshops",
+    "highlights", "currently learning", "tools", "technologies",
+    "tools and technologies", "volunteer", "additional information",
+    "selected publications", "leadership roles", "community service",
+}
 
 STOPWORD_NAME_LINES = (
     "summary", "objective", "experience", "education", "skills",
     "profile", "resume", "curriculum vitae", "highlights", "accomplishments",
 )
+
+_TITLE_WORDS = {
+    "engineer", "developer", "scientist", "analyst", "designer", "manager",
+    "intern", "student", "consultant", "architect", "administrator",
+    "specialist", "lead", "trainee",
+}
+_NON_NAME_WORDS = _TITLE_WORDS | {
+    "resume", "cv", "curriculum", "vitae", "summary", "objective", "profile",
+    "contact", "email", "phone", "mobile", "tel", "address", "github",
+    "linkedin", "portfolio", "roll", "no", "dob", "bachelor", "master",
+    "masters", "technology", "university", "college", "institute", "school",
+    "engineering", "education", "experience", "skills", "projects", "of",
+    "and", "the", "for", "in", "at", "btech", "mtech", "degree",
+}
 
 
 @dataclass
@@ -83,6 +215,7 @@ class ParsedDocument:
     portfolio_url: str = "Not detected"
     education: str = "Not detected"
     years_experience: float = 0.0
+    experience_months: int = 0
     skills: list = field(default_factory=list)
 
 
@@ -102,6 +235,58 @@ def clean_doubled_text(text: str) -> str:
     return re.sub(r"\b[A-Za-z]{6,}\b", _fix_word, text)
 
 
+def format_years(years) -> str:
+    """Human-friendly years string: 4 -> '4', 0.1 -> '0.1', 2.5 -> '2.5'."""
+    try:
+        s = f"{float(years or 0):.1f}"
+    except (TypeError, ValueError):
+        return "0"
+    return s[:-2] if s.endswith(".0") else s
+
+
+def format_experience(years, months=None, compact=False) -> str:
+    """Format work and internship experience into a human-friendly label.
+    If experience is under 1 year (e.g. 3 months internship), displays as '3 months' (or '3 mos' in compact view)
+    rather than '0.3 years' or '0 yrs'.
+    """
+    if months is None:
+        try:
+            val = float(years or 0)
+        except (TypeError, ValueError):
+            val = 0.0
+        if val <= 0:
+            return "0 yrs" if compact else "0 years"
+        total_months = round(val * 12)
+    else:
+        total_months = int(months or 0)
+
+    if total_months <= 0:
+        return "0 yrs" if compact else "0 years"
+
+    if total_months < 12:
+        unit = ("mo" if total_months == 1 else "mos") if compact else ("month" if total_months == 1 else "months")
+        return f"{total_months} {unit}"
+
+    y = total_months // 12
+    rem_m = total_months % 12
+
+    if rem_m == 0:
+        unit = ("yr" if y == 1 else "yrs") if compact else ("year" if y == 1 else "years")
+        return f"{y} {unit}"
+
+    if compact:
+        y_unit = "yr" if y == 1 else "yrs"
+        m_unit = "mo" if rem_m == 1 else "mos"
+        return f"{y} {y_unit} {rem_m} {m_unit}"
+    else:
+        y_unit = "year" if y == 1 else "years"
+        m_unit = "month" if rem_m == 1 else "months"
+        return f"{y} {y_unit} {rem_m} {m_unit}"
+
+
+# ---------------------------------------------------------------------------
+# File -> text
+# ---------------------------------------------------------------------------
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     import pdfplumber
     text_chunks = []
@@ -115,7 +300,6 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
                 char_text = c.get("text", "")
                 if not char_text.strip():
                     continue
-                # Key on character and quantized coordinate (within ~1.2 points)
                 pos_key = (char_text, round(c.get("x0", 0) / 1.2), round(c.get("top", 0) / 1.2))
                 if pos_key in seen_chars:
                     dup_ids.add(id(c))
@@ -130,31 +314,46 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
             else:
                 page_to_extract = page
 
-            t = page_to_extract.extract_text() or ""
-            # Some PDFs store the destination separately from the visible link text.
+            # x_tolerance=2 stops tightly-kerned (LaTeX) PDFs from gluing words together
+            try:
+                t = page_to_extract.extract_text(x_tolerance=2) or ""
+            except TypeError:
+                t = page_to_extract.extract_text() or ""
+
             for hyperlink in getattr(page, "hyperlinks", []):
                 uri = hyperlink.get("uri")
                 if uri:
                     t += f"\n{uri}"
             text_chunks.append(t)
-    raw_text = "\n".join(text_chunks)
-    return clean_doubled_text(raw_text)
+    return clean_doubled_text("\n".join(text_chunks))
+
+
+def _dedupe_cells(cells):
+    out = []
+    for c in cells:
+        c = " ".join(c.split())
+        if not c:
+            continue
+        if not out or out[-1] != c:
+            out.append(c)
+    return out
 
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
     import docx
+
     doc = docx.Document(io.BytesIO(file_bytes))
-    text = "\n".join(p.text for p in doc.paragraphs)
-    # python-docx exposes hyperlink destinations through the document
-    # relationships, while paragraph.text contains only their display text.
-    links = []
-    for relationship in doc.part.rels.values():
-        if relationship.is_external and relationship.target_ref.startswith(("http://", "https://")):
-            if relationship.target_ref not in links:
-                links.append(relationship.target_ref)
-    if links:
-        text += "\n" + "\n".join(links)
-    return text
+    chunks = []
+    for p in doc.paragraphs:
+        t = p.text.strip()
+        if t:
+            chunks.append(t)
+    for table in doc.tables:
+        for row in table.rows:
+            cells = _dedupe_cells([cell.text.strip() for cell in row.cells])
+            if cells:
+                chunks.append(" | ".join(cells))
+    return clean_doubled_text("\n".join(chunks))
 
 
 def extract_text(filename: str, file_bytes: bytes) -> str:
@@ -164,109 +363,445 @@ def extract_text(filename: str, file_bytes: bytes) -> str:
             return extract_text_from_pdf(file_bytes)
         if lower.endswith(".docx"):
             return extract_text_from_docx(file_bytes)
-        # plain text fallback
-        return file_bytes.decode("utf-8", errors="ignore")
+        return clean_doubled_text(file_bytes.decode("utf-8", errors="ignore"))
     except Exception:
         try:
-            return file_bytes.decode("utf-8", errors="ignore")
+            return clean_doubled_text(file_bytes.decode("utf-8", errors="ignore"))
         except Exception:
             return ""
 
 
-def guess_name(text: str, fallback: str) -> str:
-    lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip()
+# ---------------------------------------------------------------------------
+# Section detection
+# ---------------------------------------------------------------------------
+def _classify_heading(line: str):
+    """Return 'experience' / 'education' / 'other' if line is a resume
+    section heading, else None. Handles compound headings like 'Projects & Internships'."""
+    if len(line) > 60:
+        return None
+    norm = re.sub(r"[^a-z&/ ]+", " ", line.lower().replace("-", " "))
+    norm = re.sub(r"\s+", " ", norm).strip()
+    if not norm or len(norm.split()) > 6:
+        return None
+    parts = [p.strip() for p in re.split(r"\s*&\s*|\s*/\s*|\s+and\s+", norm) if p.strip()]
+    kinds = []
+    for part in parts:
+        if part in _EXPERIENCE_HEADINGS or re.search(r"\b(?:intern(?:s|ship|ships)?)\b", part):
+            kinds.append("experience")
+        elif part in _EDUCATION_HEADINGS:
+            kinds.append("education")
+        elif part in _OTHER_HEADINGS:
+            kinds.append("other")
+        else:
+            return None
+    if not kinds:
+        return None
+    # If the heading mentions experience/internship, prioritize it
+    if "experience" in kinds:
+        return "experience"
+    if "education" in kinds:
+        return "education"
+    return kinds[0]
+
+
+def _split_sections(text: str):
+    """[(kind, [lines])] where kind is preamble/experience/education/other."""
+    sections = []
+    kind, buf = "preamble", []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        heading = _classify_heading(line)
+        if heading:
+            sections.append((kind, buf))
+            kind, buf = heading, []
+        else:
+            buf.append(line)
+    sections.append((kind, buf))
+    return sections
+
+
+def _section_text(text: str, kind: str):
+    """Joined text of every section of kind, or None if there is none."""
+    chunks = [lines for k, lines in _split_sections(text) if k == kind and lines]
+    if not chunks:
+        return None
+    return "\n".join("\n".join(lines) for lines in chunks)
+
+
+def _section_markers(text: str):
+    """Character offsets where each section heading begins."""
+    markers = []
+    offset = 0
+    for raw in text.splitlines(keepends=True):
+        line = raw.strip()
+        if line:
+            heading = _classify_heading(line)
+            if heading:
+                markers.append((offset, heading))
+        offset += len(raw)
+    return markers
+
+
+def _section_kind_at(markers, positions, idx: int):
+    """Which section owns character position idx?"""
+    i = bisect.bisect_right(positions, idx) - 1
+    return markers[i][1] if i >= 0 else "preamble"
+
+
+# ---------------------------------------------------------------------------
+# Work & Internship Experience Date Ranges
+# ---------------------------------------------------------------------------
+_MONTH_PAT = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
+    r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+)
+_MONTH_NUM = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+_YEAR_PAT = r"(?:19|20)\d{2}"
+_SEP_PAT = r"\s*(?:[-–—‒―‑−－]|\bto\b|\buntil\b|\btill\b)\s*"
+_PRESENT_PAT = r"(?:present|current|now|ongoing|today|date)"
+
+# 'Jan 2020 - Mar 2022', '2019 - 2023', '2023 - Present', 'Dec 2013 to Current'
+_RANGE_FULL_RE = re.compile(
+    rf"(?<![\w/])(?:(?P<sm>{_MONTH_PAT})\.?,?\s*)?(?P<sy>{_YEAR_PAT}){_SEP_PAT}"
+    rf"(?:(?:(?P<em>{_MONTH_PAT})\.?,?\s*)?(?P<ey>{_YEAR_PAT})|(?P<pres>{_PRESENT_PAT}))(?![\w])",
+    re.IGNORECASE,
+)
+# 'July-July 2025', 'Jun - Aug 2024' (year written once, at the end)
+_RANGE_MONTHS_RE = re.compile(
+    rf"(?<![\w/])(?P<sm>{_MONTH_PAT})\.?{_SEP_PAT}(?P<em>{_MONTH_PAT})\.?,?\s*(?P<y>{_YEAR_PAT})(?![\w])",
+    re.IGNORECASE,
+)
+# '06/2013 to 09/2013', '12/2015 - Current'
+_RANGE_NUMERIC_RE = re.compile(
+    rf"(?<![\w/])(?P<sm>0?[1-9]|1[0-2])\s*[/.]\s*(?P<sy>{_YEAR_PAT}){_SEP_PAT}"
+    rf"(?:(?P<em>0?[1-9]|1[0-2])\s*[/.]\s*(?P<ey>{_YEAR_PAT})|(?P<pres>{_PRESENT_PAT}))(?![\w])",
+    re.IGNORECASE,
+)
+
+
+def _month_num(token):
+    if not token:
+        return None
+    if token.isdigit():
+        return int(token)
+    return _MONTH_NUM.get(token[:3].lower())
+
+
+def _find_ranges(text: str):
+    """Yield (match, (start_year, start_month, end_year, end_month, is_present))
+    for every date range in text, without overlapping matches."""
+    found = []
+    for m in _RANGE_FULL_RE.finditer(text):
+        found.append((m, (int(m["sy"]), _month_num(m["sm"]),
+                          int(m["ey"]) if m["ey"] else None,
+                          _month_num(m["em"]), bool(m["pres"]))))
+    for m in _RANGE_MONTHS_RE.finditer(text):
+        sm, em, y = _month_num(m["sm"]), _month_num(m["em"]), int(m["y"])
+        found.append((m, (y if sm <= em else y - 1, sm, y, em, False)))
+    for m in _RANGE_NUMERIC_RE.finditer(text):
+        found.append((m, (int(m["sy"]), _month_num(m["sm"]),
+                          int(m["ey"]) if m["ey"] else None,
+                          _month_num(m["em"]), bool(m["pres"]))))
+
+    found.sort(key=lambda item: (item[0].start(), -(item[0].end() - item[0].start())))
+    last_end = -1
+    for m, parts in found:
+        if m.start() < last_end:
+            continue
+        last_end = m.end()
+        yield m, parts
+
+
+def _interval(sy, sm, ey, em, is_present, now):
+    """Month-index interval [start, end) or None. Future dates are clamped to
+    today so '2023-2027' style ranges can never inflate experience."""
+    now_idx = now.year * 12 + now.month - 1
+    start = sy * 12 + ((sm or 1) - 1)
+    if is_present:
+        end = now_idx + 1
+    elif em:
+        end = ey * 12 + em                 # end month is inclusive
+    elif sm:
+        end = ey * 12 + (sm - 1)           # "Jun 2019 - 2021": same month, 2 years on
+    else:
+        end = ey * 12                      # "2019 - 2023": whole years between
+        if ey == sy:
+            end = start + 12               # a lone-year range like "2021 - 2021"
+    end = min(end, now_idx + 1)
+    if end <= start or end - start > 12 * 50:
+        return None
+    return start, end
+
+
+_SENT_BREAK_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\u2022\u00b7\u25aa\u25cf])")
+_ABBREVIATIONS = {"inc", "ltd", "pvt", "co", "corp", "llc", "sr", "jr", "dr", "mr", "ms", "mrs", "st", "dept"}
+
+
+def _real_breaks(s: str):
+    """Sentence breaks, ignoring 'Inc. ' / 'Ltd. ' / initials."""
+    for m in _SENT_BREAK_RE.finditer(s):
+        prev = re.search(r"(\w+)[.!?]$", s[:m.start()])
+        if prev and (prev.group(1).lower() in _ABBREVIATIONS or len(prev.group(1)) == 1):
+            continue
+        yield m
+
+
+def _cut_before(s: str) -> str:
+    last = None
+    for last in _real_breaks(s):
+        pass
+    return s[last.end():] if last else s
+
+
+def _cut_after(s: str) -> str:
+    first = next(_real_breaks(s), None)
+    return s[:first.start()] if first else s
+
+
+def _line_bounds(text: str, start: int, end: int):
+    ls = text.rfind("\n", 0, start) + 1
+    le = text.find("\n", end)
+    return ls, (len(text) if le == -1 else le)
+
+
+def _adjacent_lines(text: str, ls: int, le: int):
+    """The nearest non-blank line above and below, minus headings and date lines."""
+    found = []
+    pos = ls
+    while pos > 0:
+        pe = pos - 1
+        ps = text.rfind("\n", 0, pe) + 1
+        line, pos = text[ps:pe].strip(), ps
+        if line:
+            found.append(line[-80:])
+            break
+    pos = le
+    while pos < len(text):
+        ns = pos + 1
+        ne = text.find("\n", ns)
+        ne = len(text) if ne == -1 else ne
+        line, pos = text[ns:ne].strip(), ne
+        if line:
+            found.append(line[:80])
+            break
+    return [
+        ln for ln in found
+        if not _classify_heading(ln) and next(_find_ranges(ln), None) is None
     ]
 
-    # Look through the first 20 meaningful lines.
+
+def _work_periods(text: str, now):
+    """[(interval, period_text, context)] for every date range that represents a real job or internship."""
+    markers = _section_markers(text)
+    positions = [pos for pos, _ in markers]
+    periods = []
+    for m, parts in _find_ranges(text):
+        # (a) never inside Education / Projects / Skills / Certifications / Other
+        if _section_kind_at(markers, positions, m.start()) in ("education", "other"):
+            continue
+
+        ls, le = _line_bounds(text, m.start(), m.end())
+        before = _cut_before(text[max(ls, m.start() - 120):m.start()])
+        after = _cut_after(text[m.end():min(le, m.end() + 90)])
+        own = f"{before} {after}"
+        own_has_title = bool(_WORK_TITLE_RE.search(own))
+
+        # (b) never next to a degree / grade / unpaid role, or institution without job title
+        if _DEGREE_RE.search(own) or _UNPAID_ROLE_RE.search(own):
+            continue
+        if _STUDENT_CONTEXT_RE.search(own) and not own_has_title:
+            continue
+
+        # (c) must look like a job or internship: title / intern / employer marker nearby
+        context = own
+        if le - ls <= 140:
+            context += " " + " ".join(_adjacent_lines(text, ls, le))
+        if not (_WORK_TITLE_RE.search(context) or _EMPLOYER_RE.search(context)):
+            continue
+
+        iv = _interval(*parts, now)
+        if iv:
+            snippet = re.sub(r"\s+", " ", f"{before[-40:]}{m.group(0)}{after[:30]}").strip()
+            periods.append((iv, m.group(0).strip(), snippet))
+    return periods
+
+
+def _merged_months(intervals) -> int:
+    merged = []
+    for s, e in sorted(intervals):  # union, so overlapping roles are never double counted
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return sum(e - s for s, e in merged)
+
+
+USE_STATED_YEARS_FALLBACK = True
+
+
+def extract_work_periods(text: str, now=None):
+    """The jobs and internships that count towards experience, for verification:
+    [{'period': 'Jan 2020 - Present', 'months': 81, 'context': '...'}]"""
+    now = now or _dt.date.today()
+    periods = _work_periods(text, now)
+    if periods:
+        return [
+            {"period": period, "months": iv[1] - iv[0], "context": ctx}
+            for iv, period, ctx in periods
+        ]
+
+    # Stated internship duration fallback (e.g. '3 months internship')
+    m = MONTHS_EXP_RE.search(text) or INTERNSHIP_DURATION_RE.search(text)
+    if m:
+        stated_m = int(m.group(1))
+        if 0 < stated_m <= 120:
+            return [{"period": f"{stated_m} months", "months": stated_m, "context": m.group(0)}]
+
+    return []
+
+
+def extract_experience_months(text: str, now=None) -> int:
+    """Total months of work & internship experience.
+    Sums non-overlapping paid roles, contracts, and internships."""
+    now = now or _dt.date.today()
+    periods = _work_periods(text, now)
+    if periods:
+        return _merged_months([iv for iv, _, _ in periods])
+
+    m = MONTHS_EXP_RE.search(text) or INTERNSHIP_DURATION_RE.search(text)
+    if m:
+        stated_m = int(m.group(1))
+        if 0 < stated_m <= 120:
+            return stated_m
+
+    if USE_STATED_YEARS_FALLBACK:
+        claims = [float(match.group(1)) for match in YEARS_EXP_RE.finditer(text)]
+        claims = [c for c in claims if 0 < c <= 50]
+        if claims:
+            return round(max(claims) * 12)
+
+    return 0
+
+
+def extract_years_experience(text: str, now=None) -> float:
+    """Years of work & internship experience.
+    Education, projects, certifications, volunteering, publications and
+    degree dates never count. Overlapping jobs/internships are merged."""
+    now = now or _dt.date.today()
+    months = extract_experience_months(text, now)
+    if months:
+        return round(months / 12, 1)
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Name / Phone / Contact Extraction
+# ---------------------------------------------------------------------------
+_NAME_SPLIT_RE = re.compile(r"[|•·▪◦●■◆#§¶†‡*,;]|\s{3,}")
+
+
+def _header_segments(line: str):
+    """Split a header line into candidate chunks with contact details removed."""
+    s = re.sub(r"\(cid:\d+\)", " | ", line)
+    s = EMAIL_RE.sub(" | ", s)
+    s = URL_RE.sub(" | ", s)
+    s = PHONE_RE.sub(" | ", s)
+    s = re.sub(r"[\ue000-\uf8ff]", " | ", s)
+    return [seg.strip(" .:-–—_") for seg in _NAME_SPLIT_RE.split(s) if seg.strip(" .:-–—_")]
+
+
+def _name_words_ok(words) -> bool:
+    return not any(w.lower().strip(".,-:;()") in _NON_NAME_WORDS for w in words)
+
+
+def _is_name_word(w: str) -> bool:
+    return re.sub(r"[.'’\-]", "", w).isalpha()
+
+
+def guess_name(text: str, fallback: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
     for i, line in enumerate(lines[:20]):
-        clean = line.strip()
+        segments = _header_segments(line)
+        for seg in segments:
+            if len(seg) > 45 or _classify_heading(seg) or seg.lower() in STOPWORD_NAME_LINES:
+                continue
+            words = seg.split()
+            if not _name_words_ok(words):
+                continue
 
-        if not clean or len(clean) > 45:
-            continue
+            # Normal case: name is on one line
+            if 1 < len(words) <= 4 and all(_is_name_word(w) for w in words):
+                return seg.title() if seg.isupper() else seg
 
-        low = clean.lower()
-
-        # Ignore obvious section headings.
-        if any(k == low for k in STOPWORD_NAME_LINES):
-            continue
-
-        # Ignore contact information.
-        if EMAIL_RE.search(clean) or PHONE_RE.search(clean):
-            continue
-
-        words = clean.split()
-
-        # Reject obvious job titles / roles.
-        title_words = {
-            "engineer",
-            "developer",
-            "scientist",
-            "analyst",
-            "designer",
-            "manager",
-            "intern",
-            "student",
-            "consultant",
-            "architect",
-            "administrator",
-            "specialist",
-            "lead",
-            "trainee",
-        }
-
-        if any(
-            word.lower().strip(".,-") in title_words
-            for word in words
-        ):
-            continue
-
-        # Normal case: name is on one line.
-        if (
-            1 < len(words) <= 4
-            and all(
-                w.replace(".", "").isalpha() or w.isupper()
-                for w in words
-            )
-        ):
-            return clean.title() if clean.isupper() else clean
-
-        # PDF-layout case:
-        # name may be split across two consecutive lines,
-        # e.g. "AHELI" followed by "BANERJEE".
-        if len(words) == 1 and clean.isalpha():
-            if i + 1 < len(lines):
-                next_line = lines[i + 1].strip()
-
-                if (
-                    next_line.isalpha()
-                    and len(next_line) <= 30
-                    and next_line.lower() not in STOPWORD_NAME_LINES
-                    and next_line.lower() not in title_words
-                ):
-                    return f"{clean.title()} {next_line.title()}"
+            # PDF-layout case: name split across two lines (e.g. AHELI \n BANERJEE)
+            if len(words) == 1 and seg.isalpha() and len(segments) == 1 and i + 1 < len(lines):
+                nxt = _header_segments(lines[i + 1])
+                if len(nxt) == 1:
+                    nxt_seg = nxt[0]
+                    if (
+                        nxt_seg.isalpha()
+                        and len(nxt_seg) <= 30
+                        and _name_words_ok([nxt_seg])
+                        and nxt_seg.lower() not in STOPWORD_NAME_LINES
+                    ):
+                        return f"{seg.title()} {nxt_seg.title()}"
 
     return fallback
 
 
 def extract_phone(text: str) -> str:
-    """First PHONE_RE match that isn't actually a "2019-2023"-style date
-    range and has enough digits to plausibly be a phone number."""
+    """First candidate that is really a phone number: right digit count, not a
+    '2019-2023' date range, and not labelled as an ID ('Roll No.: 12230623055')."""
     for m in PHONE_RE.finditer(text):
-        candidate = m.group(0)
-        digit_count = sum(ch.isdigit() for ch in candidate)
-        if digit_count < 7:
+        candidate = m.group(0).strip()
+        digits = re.sub(r"\D", "", candidate)
+        has_plus = candidate.startswith("+")
+
+        if YEAR_RANGE_LOOKALIKE_RE.match(candidate):
             continue
-        if YEAR_RANGE_LOOKALIKE_RE.match(candidate.strip()):
+        if has_plus:
+            if not 8 <= len(digits) <= 15:
+                continue
+        else:
+            plausible = (
+                7 <= len(digits) <= 10
+                or (len(digits) == 11 and digits[0] in "01")
+                or (len(digits) == 12 and digits.startswith("91"))
+            )
+            if not plausible:
+                continue
+
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        if PHONE_ID_LABEL_RE.search(text[line_start:m.start()]):
             continue
         return candidate
     return None
 
 
+def extract_email(text: str) -> str:
+    """Robust email extractor handling standard formats, mailto: URIs,
+    non-breaking spaces, and spaced-out PDF text artifacts."""
+    cleaned = text.replace('\xa0', ' ').replace('\u200b', '').replace('\ufeff', '')
+    m = EMAIL_RE.search(cleaned)
+    if m:
+        return m.group(0).strip()
+    mailto_m = re.search(r"mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", cleaned, re.IGNORECASE)
+    if mailto_m:
+        return mailto_m.group(1).strip()
+    spaced_m = re.search(r"([a-zA-Z0-9._%+\-]+)\s*@\s*([a-zA-Z0-9.\-]+)\s*\.\s*([a-zA-Z]{2,})", cleaned)
+    if spaced_m:
+        return f"{spaced_m.group(1)}@{spaced_m.group(2)}.{spaced_m.group(3)}".strip()
+    return "Not detected"
+
+
 def extract_social_links(text: str) -> dict:
-    """Extract the main professional links from resume text."""
+    """Extract professional links (LinkedIn, GitHub, Portfolio)."""
     links = []
     for match in URL_RE.finditer(text):
         link = match.group(0).rstrip(".,;:)]}")
@@ -331,139 +866,53 @@ def extract_social_link_labels(text: str) -> dict:
     return labels
 
 
-def extract_years_experience(text: str) -> float:
-    """Extract years of professional work experience.
-    Avoids mistaking academic study dates (e.g. 2023 - 2027 degree program)
-    for professional work experience."""
-    m = YEARS_EXP_RE.search(text)
-    if m:
-        return float(m.group(1))
-
-    # Look specifically within an Experience / Employment section
-    section_headers = r"(?:work\s+experience|professional\s+experience|employment\s+history|work\s+history|experience)"
-    next_headers = r"(?:education|technical\s+skills|skills|projects|project|certifications|publications|achievements|awards|interests|languages|hobbies)"
-
-    exp_pattern = re.compile(
-        rf"(?:^|\n)\s*{section_headers}\b[:\s]*(.*?)(?=\n\s*{next_headers}\b|\Z)",
-        re.IGNORECASE | re.DOTALL,
-    )
-    exp_match = exp_pattern.search(text)
-    if not exp_match:
-        return 0.0
-
-    exp_text = exp_match.group(1)
-    if len(exp_text.strip()) < 10:
-        return 0.0
-
-    current_year = datetime.date.today().year
-    years_found = []
-    for match in DATE_RANGE_RE.finditer(exp_text):
-        span_text = match.group(0)
-        start_match = re.search(r"(19|20)\d{2}", span_text)
-        if start_match:
-            start_year = int(start_match.group(0))
-            if "present" in span_text.lower() or "current" in span_text.lower():
-                end_year = current_year
-            else:
-                all_years = re.findall(r"(?:19|20)\d{2}", span_text)
-                end_year = int(all_years[-1]) if len(all_years) > 1 else start_year
-            # Future end year is graduation or expected end, not past experience
-            if end_year > current_year:
-                continue
-            if current_year >= end_year >= start_year:
-                years_found.append(end_year - start_year)
-
-    if years_found:
-        return float(max(years_found))
-    return 0.0
-
-
+# ---------------------------------------------------------------------------
+# Education Extraction
+# ---------------------------------------------------------------------------
 def extract_education_section(text: str) -> str:
-    """Isolate the Education / Academic section from the document to avoid
-    false positives in project names, technical skills, or email domains."""
-    header_pattern = re.compile(
-        r"(?:^|\n|\r)\s*(?:education(?:\s+and\s+training|\s+background|\s+qualifications|\s+details)?|academics?|academic\s+background|qualifications?)\b[:\s]*(.*)",
+    """Extract specifically the Education section text from a resume to avoid
+    false positive degree matches from other sections."""
+    sec = _section_text(text, "education")
+    if sec:
+        return sec
+    edu_match = re.search(
+        r"(?:^|\n)\s*(?:education|academic\s+background|academics|qualifications)\b[:\s]*(.*?)(?=\n\s*(?:experience|skills|projects|certifications|awards|interests)\b|\Z)",
+        text,
         re.IGNORECASE | re.DOTALL,
     )
-    m = header_pattern.search(text)
-    if not m:
-        return ""
-    remainder = m.group(1)
-    end_pattern = re.compile(
-        r"(?:\n|\r)\s*(?:work\s+experience|professional\s+experience|experience|employment|work\s+history|technical\s+skills|key\s+skills|skills|projects?|certifications?|publications?|achievements?|awards?|hobbies|interests|summary|objective)\b",
-        re.IGNORECASE,
-    )
-    end_m = end_pattern.search(remainder)
-    if end_m:
-        return remainder[:end_m.start()]
-    return remainder[:1500]
+    if edu_match and len(edu_match.group(1).strip()) > 5:
+        return edu_match.group(1)
+    return ""
 
 
-def extract_education(text: str) -> str:
-    """Extract highest education level using regex word boundaries and section isolation.
-    Prevents false positives (e.g., 'gmail' matching 'ma', 'master server' matching 'master')."""
-    edu_section = extract_education_section(text)
-    targets = [edu_section, text] if edu_section and len(edu_section.strip()) > 5 else [text]
+def extract_education(text: str, mode: str = "highest") -> str:
+    """Degree level mentioned in text (in the Education section if present).
 
-    for scope_idx, scope in enumerate(targets):
-        is_edu_section = (scope_idx == 0 and bool(edu_section) and len(edu_section.strip()) > 5)
-        low = scope.lower()
+    mode='highest' - candidate level (resumes).
+    mode='lowest'  - minimum JD requirement ('Bachelor's required, Master's preferred' -> Bachelor's).
+    """
+    scopes = []
+    edu_text = extract_education_section(text)
+    if edu_text:
+        scopes.append(edu_text)
+    scopes.append(text)
 
-        # 1. PhD / Doctorate
-        if re.search(r"\b(?:ph\.?\s*d\.?|doctorate|doctor\s+of\s+philosophy)\b", low):
-            return "PhD / Doctorate"
-
-        # 2. Master's Degree
-        master_matches = list(re.finditer(r"\bmaster(?:['’]s)?\b", low))
-        has_real_master = False
-        for mm in master_matches:
-            start = max(0, mm.start() - 25)
-            end = min(len(low), mm.end() + 25)
-            snippet = low[start:end]
-            if re.search(r"\b(?:scrum|server|node|slave|nim|media|web|task)\s+master\b", snippet) or \
-               re.search(r"\bmaster\s+(?:server|node|slave|branch|key)\b", snippet):
-                continue
-            has_real_master = True
+    levels = EDUCATION_LEVELS if mode == "highest" else list(reversed(EDUCATION_LEVELS))
+    for scope in scopes:
+        for pattern, label in levels:
+            if pattern.search(scope):
+                return label
+        # If an explicit education section exists, do not fall back to search other sections
+        if scope is edu_text and edu_text:
             break
-
-        if has_real_master:
-            return "Master's Degree"
-
-        if re.search(r"\b(?:m\.?\s*tech|mba|mca|m\.?\s*sc\.?|m\.?\s*phil\.?|post\s*graduate)\b", low):
-            return "Master's Degree"
-
-        # M.S. with degree context
-        if re.search(r"\b(?:m\.s\.|m\s*\.\s*s\.|master\s+of\s+science)\b", low):
-            return "Master's Degree"
-        if is_edu_section and re.search(r"\bms\s*(?::|\bin\b|\bof\b|degree)", low):
-            return "Master's Degree"
-
-        # 3. Bachelor's Degree
-        if re.search(r"\b(?:bachelor(?:['’]s)?|b\.?\s*tech|b\.?\s*e\.?|b\.?\s*sc\.?|bca|bba|b\.?\s*com|undergraduate)\b", low):
-            return "Bachelor's Degree"
-        if re.search(r"\b(?:b\.s\.|b\s*\.\s*s\.|b\s*\.\s*s\b|bachelor\s+of\s+science)\b", low):
-            return "Bachelor's Degree"
-        if is_edu_section and re.search(r"\bbs\b", low):
-            return "Bachelor's Degree"
-
-        # 4. Associate Degree
-        if re.search(r"\bassociate(?:['’]s)?(?:\s+degree|\s+of\s+[a-z]+)?\b", low):
-            return "Associate Degree"
-
-        # 5. Diploma
-        if re.search(r"\b(?:diploma|polytechnic)\b", low):
-            return "Diploma"
-
-        # 6. High School
-        if re.search(r"\b(?:high\s+school|higher\s+secondary|secondary\s+school|wbchse|cbse|icse)\b", low):
-            return "High School"
-
     return "Not detected"
 
 
+# ---------------------------------------------------------------------------
+# Skills Extraction
+# ---------------------------------------------------------------------------
 def extract_skills(text: str, extra_skills: list = None) -> list:
     """extra_skills lets callers extend the built-in taxonomy at runtime
-    (e.g. org-specific tools like LangGraph or vLLM added via Settings)
     without editing skills_taxonomy.py."""
     low = " " + re.sub(r"[^a-z0-9.+#/\s]", " ", text.lower()) + " "
     found = set()
@@ -486,38 +935,23 @@ def extract_skills(text: str, extra_skills: list = None) -> list:
         if re.search(pattern, low):
             found.add(skill)
 
-    # Heuristic: Extract capitalized tokens from "Skills" or "Technologies" sections
+    # Heuristic: Extract capitalized tokens from 'Skills' or 'Technologies' sections
     skills_section_re = re.compile(r"(?:skills|technologies)[\s]*:[\s]*(.*?)(?:\n\n|\Z)", re.IGNORECASE | re.DOTALL)
     for match in skills_section_re.finditer(text):
         section_text = match.group(1)
-        # split by commas, bullets, or newlines
         tokens = re.split(r'[,\n•·|-]', section_text)
         for token in tokens:
             cleaned = token.strip()
             if cleaned and len(cleaned) <= 30 and len(cleaned.split()) <= 3:
-                # only keep it if it has at least one uppercase letter (heuristic for a proper noun/tech)
                 if any(c.isupper() for c in cleaned):
                     found.add(cleaned)
 
     return sorted(found)
 
 
-def extract_email(text: str) -> str:
-    """Robust email extractor handling standard formats, mailto: URIs,
-    non-breaking spaces, and spaced-out PDF text artifacts."""
-    cleaned = text.replace('\xa0', ' ').replace('\u200b', '').replace('\ufeff', '')
-    m = EMAIL_RE.search(cleaned)
-    if m:
-        return m.group(0).strip()
-    mailto_m = re.search(r"mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", cleaned, re.IGNORECASE)
-    if mailto_m:
-        return mailto_m.group(1).strip()
-    spaced_m = re.search(r"([a-zA-Z0-9._%+\-]+)\s*@\s*([a-zA-Z0-9.\-]+)\s*\.\s*([a-zA-Z]{2,})", cleaned)
-    if spaced_m:
-        return f"{spaced_m.group(1)}@{spaced_m.group(2)}.{spaced_m.group(3)}".strip()
-    return "Not detected"
-
-
+# ---------------------------------------------------------------------------
+# High-Level Document Parsing
+# ---------------------------------------------------------------------------
 def parse_document(filename: str, file_bytes: bytes, extra_skills: list = None) -> ParsedDocument:
     text = extract_text(filename, file_bytes)
     fallback_name = re.sub(r"\.[a-zA-Z0-9]+$", "", filename).replace("_", " ").replace("-", " ").title()
@@ -525,6 +959,8 @@ def parse_document(filename: str, file_bytes: bytes, extra_skills: list = None) 
     email = extract_email(text)
     phone = extract_phone(text)
     social_links = extract_social_links(text)
+    exp_months = extract_experience_months(text)
+    years_exp = extract_years_experience(text)
 
     return ParsedDocument(
         raw_text=text,
@@ -533,7 +969,8 @@ def parse_document(filename: str, file_bytes: bytes, extra_skills: list = None) 
         phone=phone if phone else "Not detected",
         **social_links,
         education=extract_education(text),
-        years_experience=extract_years_experience(text),
+        years_experience=years_exp,
+        experience_months=exp_months,
         skills=extract_skills(text, extra_skills=extra_skills),
     )
 
@@ -542,7 +979,7 @@ def parse_job_description(jd_text: str, min_years_override=None, extra_skills: l
     skills = extract_skills(jd_text, extra_skills=extra_skills)
     years_match = YEARS_EXP_RE.search(jd_text)
     min_years = float(years_match.group(1)) if years_match else (min_years_override or 0.0)
-    education = extract_education(jd_text)
+    education = extract_education(jd_text, mode="lowest")
     return {
         "raw_text": jd_text,
         "required_skills": skills,

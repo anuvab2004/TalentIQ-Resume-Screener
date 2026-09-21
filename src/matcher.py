@@ -68,6 +68,7 @@ class MatchResult:
     portfolio_url: str = "Not detected"
     education: str = "Not detected"
     years_experience: float = 0.0
+    experience_months: int = 0
     fairness_audit: dict = field(default_factory=dict)
     semantic_engine: str = "tfidf"
     candidate_id: str = ""
@@ -342,6 +343,7 @@ def score_candidate(parsed_resume, parsed_jd, filename="", semantic_backend="aut
         portfolio_url=parsed_resume.portfolio_url,
         education=parsed_resume.education,
         years_experience=parsed_resume.years_experience,
+        experience_months=getattr(parsed_resume, "experience_months", 0),
         fairness_audit=fairness_audit,
         semantic_engine=engine_used,
         candidate_id=make_candidate_id(filename, parsed_resume.name, parsed_resume.email, parsed_resume.phone),
@@ -519,6 +521,7 @@ def score_candidates_batch(
                 portfolio_url=parsed_resume.portfolio_url,
                 education=parsed_resume.education,
                 years_experience=parsed_resume.years_experience,
+                experience_months=getattr(parsed_resume, "experience_months", 0),
                 fairness_audit=fairness_audit,
                 semantic_engine=engine_used,
                 candidate_id=make_candidate_id(
