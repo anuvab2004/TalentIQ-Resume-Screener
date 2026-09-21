@@ -32,9 +32,9 @@ SKILL_CATEGORIES = {
         "Snowflake", "dbt", "Databricks",
     ],
     "Cloud & DevOps": [
-        "AWS", "Amazon Web Services", "Azure", "Google Cloud Platform", "GCP",
+        "AWS", "Amazon Web Services", "EC2", "S3", "SQS", "Azure", "Google Cloud Platform", "GCP",
         "Docker", "Kubernetes", "Terraform", "Ansible", "Jenkins",
-        "CI/CD", "Git", "GitHub", "GitLab", "Linux", "Unix", "AIX", "Bash",
+        "CI/CD", "Git", "GitHub", "GitLab", "Linux", "Unix", "AIX", "AWK", "Autofs", "Apache Tomcat", "Bash",
         "Nginx", "Microservices", "Serverless", "DevOps",
         "Site Reliability Engineering", "Cloud Architecture",
     ],
@@ -190,6 +190,18 @@ SYNONYMS = {
     "cross functional collaboration": "Cross-functional Collaboration",
     "cross-functional teams": "Cross-functional Collaboration",
     "snow flake": "Snowflake",
+    "amazon ec2": "EC2",
+    "ec2": "EC2",
+    "amazon s3": "S3",
+    "s3": "S3",
+    "amazon sqs": "SQS",
+    "sqs": "SQS",
+    "apache tomcat": "Apache Tomcat",
+    "tomcat": "Apache Tomcat",
+    "awk": "AWK",
+    "auto mounts": "Autofs",
+    "auto-mounts": "Autofs",
+    "autofs": "Autofs",
 }
 
 def canonicalize(term: str) -> str:

@@ -1172,6 +1172,16 @@ NUMBER_START_WHITELIST = {"3ds max", "7-zip", "802.11", "3d modeling", "3d desig
 COMPOUND_STOPWORD_WHITELIST = {"design of experiments", "internet of things", "point of sale", "c++", "c#", ".net"}
 
 
+# Generic / weak skills that dilute match quality
+GENERIC_WEAK_SKILLS = {
+    "architecture",
+    "application server",
+    "access",
+    "backup",
+    "backups",
+}
+
+
 def _is_valid_skill_token(token: str, in_skills_section: bool = False, full_text: str = "") -> bool:
     """Filter out leaked headers, US state codes, single-letter junk, role titles, date fragments,
     mixed year/digit fragments, numbers, and invalid sentence pieces (Bug C validation layer)."""
@@ -1180,6 +1190,10 @@ def _is_valid_skill_token(token: str, in_skills_section: bool = False, full_text
     raw = token.strip()
     low = raw.lower().strip(".,:;()[]{}*#-–—/|")
     if not low:
+        return False
+
+    # Issue 4: Reject generic / weak skills that dilute match quality
+    if low in GENERIC_WEAK_SKILLS:
         return False
 
     # 1. Word count constraint: Real skills are 1–4 words long
@@ -1267,29 +1281,38 @@ def extract_skills(text: str, extra_skills: list = None) -> list:
     cleaned_text = cleaned_text.replace("\r", " ").replace("\n", " ")
 
     low = " " + re.sub(r"[^a-z0-9.+#/\s-]", " ", cleaned_text.lower()) + " "
-    found = set()
 
+    # Longest-match-first lookup across synonyms and master skills
+    all_dict_items = []
+    # 1. Synonyms: (alias, canonical_target)
+    for alias, canonical in SYNONYMS.items():
+        all_dict_items.append((alias.strip(), canonical))
+    # 2. Master skills: (skill_name, canonical_target)
     for skill in MASTER_SKILLS:
         skill_clean = skill.strip()
-        skill_low = skill_clean.lower()
-        if not _is_valid_skill_token(skill_clean, in_skills_section=True, full_text=text):
-            continue
-        pattern = r"(?<![a-z0-9])" + re.escape(skill_low) + r"(?![a-z0-9])"
-        if re.search(pattern, low):
-            found.add(canonicalize(skill_clean))
-
-    for alias, canonical in SYNONYMS.items():
-        pattern = r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])"
-        if re.search(pattern, low):
-            found.add(canonical)
-
+        all_dict_items.append((skill_clean, canonicalize(skill_clean)))
+    # 3. Extra skills
     for skill in (extra_skills or []):
         skill_clean = skill.strip()
-        if not skill_clean or not _is_valid_skill_token(skill_clean, in_skills_section=True, full_text=text):
+        if skill_clean:
+            all_dict_items.append((skill_clean, canonicalize(skill_clean)))
+
+    # Sort dictionary entries by length descending for longest-match-first extraction
+    all_dict_items.sort(key=lambda item: len(item[0]), reverse=True)
+
+    candidates = set()
+
+    for pattern_term, canonical_name in all_dict_items:
+        term_clean = pattern_term.strip()
+        term_low = term_clean.lower()
+        if not _is_valid_skill_token(term_clean, in_skills_section=True, full_text=text):
             continue
-        pattern = r"(?<![a-z0-9])" + re.escape(skill_clean.lower()) + r"(?![a-z0-9])"
+        if not _is_valid_skill_token(canonical_name, in_skills_section=True, full_text=text):
+            continue
+
+        pattern = r"(?<![a-z0-9])" + re.escape(term_low) + r"(?![a-z0-9])"
         if re.search(pattern, low):
-            found.add(canonicalize(skill_clean))
+            candidates.add(canonical_name)
 
     # Dedicated Skills Sections extraction
     skills_sec_text = _section_text(text, "skills") or ""
@@ -1307,9 +1330,44 @@ def extract_skills(text: str, extra_skills: list = None) -> list:
             if _is_valid_skill_token(token, in_skills_section=True, full_text=text):
                 canon = canonicalize(token)
                 if _is_valid_skill_token(canon, in_skills_section=True, full_text=text):
-                    found.add(canon)
+                    candidates.add(canon)
 
-    return sorted(found)
+    # Issue 2: Case-insensitive deduplication
+    # Issue 1: Canonical dictionary lookup (map raw to canonical form)
+    canon_map = {}
+    for item in candidates:
+        low_k = item.strip().lower()
+        if low_k not in canon_map:
+            canon_map[low_k] = item
+
+    # Issue 3: Substring overlaps — Longest-match-first extraction, plus a rule
+    # that drops a skill if it's a strict substring/subphrase of another matched skill
+    # (e.g., drops 'Access' if 'Access Control' appears, or 'Backup' if 'Backups' appears)
+    sorted_terms = sorted(canon_map.keys(), key=lambda x: len(x), reverse=True)
+    kept_terms = []
+
+    for term in sorted_terms:
+        # Whitelisted single-letter skills like 'c' or 'r' are distinct languages and should not be suppressed by 'cross'
+        if term in SINGLE_LETTER_WHITELIST:
+            kept_terms.append(term)
+            continue
+
+        # Check if this term is a strict substring/subphrase of any already accepted longer skill
+        is_sub = False
+        for longer in kept_terms:
+            # 1. Multi-word phrase boundary (e.g. 'access' in 'access control')
+            if re.search(rf"\b{re.escape(term)}\b", longer):
+                is_sub = True
+                break
+            # 2. Plural or singular stem variation (e.g. 'backup' vs 'backups', 'test' vs 'tests')
+            if longer == term + "s" or longer == term + "es" or term == longer + "s":
+                is_sub = True
+                break
+        if not is_sub:
+            kept_terms.append(term)
+
+    final_skills = [canon_map[t] for t in kept_terms]
+    return sorted(final_skills)
 
 
 # ---------------------------------------------------------------------------

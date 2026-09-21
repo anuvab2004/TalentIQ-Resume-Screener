@@ -396,6 +396,59 @@ class ParserRegressionSuite(unittest.TestCase):
             self.assertNotIn("2008", s)
             self.assertNotIn("11", s)
 
+    def test_20_skill_casing_dedup_and_substring_overlap(self):
+        from src.parser import extract_skills, _is_valid_skill_token
+        # Issue 1: Canonical dictionary lookup
+        # Amazon Ec2 -> EC2, Amazon S3 -> S3, Amazon Sqs -> SQS
+        # Apache TOMCAT -> Apache Tomcat, Awk -> AWK, Auto mounts -> Autofs
+        text_case = "Proficient in Amazon Ec2, Amazon S3, Amazon Sqs, Apache TOMCAT, Awk, and Auto mounts."
+        skills_1 = extract_skills(text_case)
+        self.assertIn("EC2", skills_1)
+        self.assertIn("S3", skills_1)
+        self.assertIn("SQS", skills_1)
+        self.assertIn("Apache Tomcat", skills_1)
+        self.assertIn("AWK", skills_1)
+        self.assertIn("Autofs", skills_1)
+        self.assertNotIn("Amazon Ec2", skills_1)
+        self.assertNotIn("Amazon Sqs", skills_1)
+        self.assertNotIn("Apache TOMCAT", skills_1)
+
+        # Issue 2: Duplicate entries with different casing
+        # AWK and Awk both appear -> only one AWK in output
+        # Amazon SQS and Amazon Sqs both appear -> only one SQS in output
+        text_dup = "Skills: AWK, Awk, Amazon SQS, Amazon Sqs"
+        skills_2 = extract_skills(text_dup)
+        awk_count = sum(1 for s in skills_2 if s.lower() == "awk")
+        sqs_count = sum(1 for s in skills_2 if s.lower() == "sqs")
+        self.assertEqual(awk_count, 1)
+        self.assertEqual(sqs_count, 1)
+        self.assertEqual(skills_2, ["AWK", "SQS"])
+
+        # Issue 3: Substring overlaps
+        # Access and Access Control both appear -> drop Access
+        # Backup and Backups both appear -> drop Backup
+        text_overlap = "Experience with Access, Access Control, Backup, and Backups procedures."
+        extra = ["Access Control", "Access", "Backups", "Backup"]
+        skills_3 = extract_skills(text_overlap, extra_skills=extra)
+        self.assertIn("Access Control", skills_3)
+        self.assertNotIn("Access", skills_3)
+
+        # Issue 4: Generic / weak skills
+        # Architecture, Application Server, Access, Backup must be rejected
+        self.assertFalse(_is_valid_skill_token("Architecture"))
+        self.assertFalse(_is_valid_skill_token("Application Server"))
+        self.assertFalse(_is_valid_skill_token("Access"))
+        self.assertFalse(_is_valid_skill_token("Backup"))
+        self.assertFalse(_is_valid_skill_token("Backups"))
+        text_generic = "Skills: Architecture, Application Server, Access, Backup, Python, Docker"
+        skills_4 = extract_skills(text_generic)
+        self.assertIn("Python", skills_4)
+        self.assertIn("Docker", skills_4)
+        self.assertNotIn("Architecture", skills_4)
+        self.assertNotIn("Application Server", skills_4)
+        self.assertNotIn("Access", skills_4)
+        self.assertNotIn("Backup", skills_4)
+
 
 if __name__ == "__main__":
     unittest.main()
