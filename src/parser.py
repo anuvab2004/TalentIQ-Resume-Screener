@@ -217,13 +217,17 @@ class ParsedDocument:
     resolved_present_date: str = ""
 
 
-def format_years(years) -> str:
-    """Human-friendly years: 4 -> "4", 0.1 -> "0.1", 2.5 -> "2.5"."""
+def format_years(years, compact: bool = False) -> str:
+    """Human-friendly years: 4 -> "4" (or "4 yrs"), 0.1 -> "0.1", 2.5 -> "2.5"."""
     try:
         s = f"{float(years or 0):.1f}"
     except (TypeError, ValueError):
-        return "0"
-    return s[:-2] if s.endswith(".0") else s
+        return "0 yrs" if compact else "0"
+    val = s[:-2] if s.endswith(".0") else s
+    if compact:
+        suffix = "yr" if val == "1" else "yrs"
+        return f"{val} {suffix}"
+    return val
 
 
 # ---------------------------------------------------------------------------
@@ -611,7 +615,7 @@ def _merged_months(intervals) -> int:
 USE_STATED_YEARS_FALLBACK = True
 
 
-def extract_work_periods(text: str, now=None):
+def extract_work_periods(text: str, now=None, *args, **kwargs):
     """The jobs / internships that count towards experience, for verification:
     [{"period": "Jan 2020 - Present", "months": 81, "context": "..."}]"""
     now = now or _dt.date.today()
@@ -884,13 +888,24 @@ def format_experience(years, months=None, compact=False) -> str:
     """Format experience displaying months for short periods or years."""
     if months is not None and months > 0:
         if months < 12:
-            return f"{months} mo" if compact else f"{months} month{'s' if months != 1 else ''}"
+            return f"{months} mo{'s' if months != 1 else ''}" if compact else f"{months} month{'s' if months != 1 else ''}"
         y = months // 12
         rem_m = months % 12
         if rem_m == 0:
             return f"{y} yr{'s' if y != 1 else ''}" if compact else f"{y} year{'s' if y != 1 else ''}"
-        return f"{y} yr{'s' if y != 1 else ''} {rem_m} mo" if compact else f"{y} year{'s' if y != 1 else ''} {rem_m} month{'s' if rem_m != 1 else ''}"
-    return format_years(years, compact=compact)
+        return f"{y} yr{'s' if y != 1 else ''} {rem_m} mo{'s' if rem_m != 1 else ''}" if compact else f"{y} year{'s' if y != 1 else ''} {rem_m} month{'s' if rem_m != 1 else ''}"
+    try:
+        y_val = float(years or 0)
+    except (TypeError, ValueError):
+        y_val = 0.0
+    y_str = f"{y_val:.1f}"
+    if y_str.endswith(".0"):
+        y_str = y_str[:-2]
+    if compact:
+        suffix = "yr" if y_str == "1" else "yrs"
+        return f"{y_str} {suffix}"
+    suffix = "year" if y_str == "1" else "years"
+    return f"{y_str} {suffix}"
 
 
 def extract_experience_months(text: str, now=None) -> int:
@@ -902,7 +917,15 @@ def extract_experience_months(text: str, now=None) -> int:
 
 
 def clean_doubled_text(text: str) -> str:
-    return text or ""
+    if not text:
+        return ""
+    def _fix_word(match):
+        w = match.group(0)
+        if len(w) >= 6 and len(w) % 2 == 0:
+            if all(w[i].lower() == w[i + 1].lower() for i in range(0, len(w), 2)):
+                return "".join(w[i] for i in range(0, len(w), 2))
+        return w
+    return re.sub(r"\b[A-Za-z]{6,}\b", _fix_word, text)
 
 
 def extract_email(text: str) -> str:
