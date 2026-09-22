@@ -31,18 +31,18 @@ candidates against a job description with a transparent, explainable score.
 | # | MVP feature | Status |
 |---|---|---|
 | 1 | Bulk resume upload (PDF / DOCX / TXT) | ✅ |
-| 2 | Resume parsing — name, email, phone, LinkedIn, GitHub, portfolio, skills, education, years of experience | ✅ |
+| 2 | Resume parsing — name, email, phone, LinkedIn, GitHub, portfolio/coding profile, skills, education, years of experience | ✅ |
 | 3 | Job description input (paste or pick from saved requisitions) | ✅ |
 | 4 | Skill extraction from the JD, with synonym/abbreviation matching | ✅ |
 | 5 | Matching engine — weighted 0–100 relevance score per candidate | ✅ |
-| 6 | Results dashboard — ranked list, matched/missing skills per candidate | ✅ |
-| 7 | Basic storage — requisitions, resumes, and scores persist for the session | ✅ |
+| 6 | Results dashboard — ranked list, matched/missing skills per candidate, and resume document viewer | ✅ |
+| 7 | Multi-tenant cloud persistence & storage — Supabase PostgreSQL + private Storage bucket, with automatic offline fallback | ✅ |
 
 Every page sits behind **sign-in / sign-up** (§2.5). Bonus features shipped: **Explainability** (full per-factor breakdown, not
 just a score), **Bulk upload** (screen an entire batch into one ranked
 shortlist), **Bias & fairness checking** (JD language scanner + a per-candidate
-blind-scoring audit — see §2.1), **Interview question generation** (§2.2), and
-**Candidate email automation** (§2.3).
+blind-scoring audit — see §2.1), **Interview question generation** (§2.2),
+**Candidate email automation** (§2.3), and **Original resume viewer & downloader**.
 
 ### 2.1 Bias & fairness checking
 
@@ -78,20 +78,24 @@ password) or **download it as a `.eml` file** to open in their own mail
 client if SMTP isn't set up. Credentials are never logged; see *What is saved*
 below for how they are stored.
 
-**What is saved.** Two things persist across refreshes and restarts until you
-change them in ⚙️ Settings — separately for each signed-in account (§2.5):
+**What is saved.** The application provides multi-tenant cloud persistence
+through **Supabase** with seamless offline fallback:
 
+- *Requisitions & Candidates* → stored in Supabase PostgreSQL (`requisitions`,
+  `candidates`, `interview_guides`, `email_logs`). Each record is tagged with
+  the recruiter's authenticated `user_id` for complete multi-tenant isolation.
+- *Resume Files* → uploaded directly to a private Supabase Storage bucket
+  (`resumes`) under `{user_id}/{req_id}/{filename}` and can be viewed or
+  downloaded directly within the candidate profile drawer.
 - *Organization & Email Identity* (company name, your name, your title) →
-  `data/settings.json` (git-ignored), written when you press **Save
-  organization details**.
+  `data/settings.json` (git-ignored), saved per account.
 - *Email Automation* (provider, host, port, email address, app password) →
   `~/.talentiq/smtp_<account id>.json` in the **user folder of the machine
   running the app, deliberately outside the project** so zipping, committing or
   submitting the project can't leak it.
   Saved with **Save email settings**; tick/untick *Remember on this computer*
   to keep it across restarts or for the current session only; **Forget email &
-  password** deletes it. The saved password is never sent back to the browser —
-  leave the password box blank to keep it, type a new one to replace it.
+  password** deletes it. The saved password is never sent back to the browser.
 
 The password is protected by file permissions (owner-only), **not encrypted**,
 so always use an *app password* you can revoke, never your real login password.
@@ -103,39 +107,31 @@ though; if you'd rather not keep it there at all, set the environment variable
 from disk (session-only). Other overrides: `TALENTIQ_DATA_DIR`,
 `TALENTIQ_SECRET_DIR`.
 
-Persistence goes through `src/settings_store.py`, so moving it to Supabase later
-means replacing a few small functions there.
-
 ### 2.5 Accounts: sign in, sign up, sign out
 
 Nothing in the workspace renders until a recruiter signs in.
 
+- **Supabase Auth Integration** — accounts are authenticated against Supabase
+  Auth (GoTrue) in production, meaning user accounts and data persist
+  independently of container reboots or cloud redeployments.
+- **7-Day Session Persistence** — signed-in recruiters receive a tamper-proof
+  HMAC-signed session token stored in browser local storage, preventing
+  accidental logout on page refreshes.
+- **Offline Demo Fallback** — if Supabase credentials are not configured,
+  TalentIQ gracefully runs in local demo mode, keeping the app 100% functional
+  with zero external setup.
 - **Create account** — full name, work email, password (8+ characters with a
   letter and a number; very common passwords are rejected). The name pre-fills
   the email sign-off in Settings.
 - **Sign in** — email + password. Emails are case-insensitive. Wrong
   password and unknown email give the same message, and 5 wrong passwords in a
   row lock that account for 5 minutes.
-- **Sign out** — sidebar button (or Settings → Account). It wipes the whole
-  session, so the next person on the same browser starts clean.
-- **Change password** — Settings → Account.
-- **Per-account settings** — organization identity, workspace prefs and the SMTP
-  mailbox are stored per account, so one recruiter can never send email from
-  another recruiter's mailbox on a shared deployment.
-
-Accounts live in `data/users.db` (SQLite, git-ignored; move it with
-`TALENTIQ_DATA_DIR`). Passwords are stored only as salted `scrypt` hashes,
-using the standard library — no new dependency. Sessions last as long as the
-browser tab: a page refresh signs you out (Streamlit resets session state on
-refresh). Requisitions, resumes and scores are still session-scoped, as before.
-
-**Hosting note.** Streamlit Community Cloud wipes the app's disk on every
-reboot/redeploy, which deletes `data/users.db` — accounts created there
-disappear. For a demo, create the account right before presenting; for anything
-lasting, host somewhere with a persistent disk (Render/Railway volume, a VM) or
-move `src/auth.py` to Supabase/Postgres (its SQL is confined to that file).
-
-Run the tests with `python -m unittest discover -s tests -v`.
+- **Sign out** — sidebar button (or Settings → Account). Clears the session
+  and token so the next user starts clean.
+- **Per-account tenant isolation** — organization identity, workspace prefs,
+  job requisitions, candidates, guides, and mailboxes are strictly isolated per
+  account, ensuring recruiters on a shared deployment only access their own
+  work.
 
 ### 2.4 Dashboard behaviour
 
@@ -200,53 +196,90 @@ flowchart LR
 
 ```
 talentiq/
-├── app.py                     # Streamlit entrypoint (all pages)
+├── app.py                         # Streamlit entrypoint (all pages & UI components)
+├── Dockerfile                     # Container deployment image definition
+├── docker-compose.yml             # Single-command Docker Compose orchestration
+├── requirements.txt               # Dependencies (Streamlit, Scikit-learn, Supabase, etc.)
+├── .env.example                   # Environment variable template
+├── .streamlit/config.toml         # UI theme and server configuration
 ├── src/
-│   ├── parser.py               # Text extraction + structured resume/JD parsing
-│   ├── matcher.py               # Weighted scoring engine + batch ranking + explainability
-│   ├── bias_checker.py          # JD language scanner + blind-scoring fairness audit
-│   ├── interview_questions.py   # Rule-based interview question generator
-│   ├── email_automation.py      # Email templates + SMTP send + .eml export
-│   ├── auth.py                  # Accounts: Supabase Auth integration (sign-up, sign-in, session)
-│   ├── auth_ui.py               # Sign-in / sign-up screen with Supabase Auth
-│   ├── db.py                    # Supabase database persistence (requisitions, candidates, guides, logs)
-│   ├── settings_store.py        # Saved org identity, workspace defaults, SMTP credentials (per account)
-│   ├── skills_taxonomy.py       # Curated skill list + synonym/abbreviation map
-│   ├── sample_data.py           # Loads the bundled demo dataset
-│   └── styling.py                # Custom CSS / theming helpers
+│   ├── parser.py                  # Multi-format text extraction (PDF/DOCX/TXT) + structured parsing
+│   ├── matcher.py                 # Weighted scoring engine + batch ranking + explainability
+│   ├── bias_checker.py             # JD language scanner + blind-scoring fairness audit
+│   ├── interview_questions.py      # Rule-based interview question generator
+│   ├── email_automation.py         # Email templates + SMTP send + .eml export
+│   ├── auth.py                     # Accounts: Supabase Auth (GoTrue) + 7-day HMAC session persistence
+│   ├── auth_ui.py                  # Responsive sign-in / sign-up modal interface
+│   ├── db.py                       # Cloud persistence & storage via Supabase (PostgreSQL + Storage)
+│   ├── settings_store.py           # Saved org identity, workspace defaults, SMTP credentials (per account)
+│   ├── skills_taxonomy.py          # Curated skill list + synonym/abbreviation map
+│   ├── sample_data.py              # Bundled demo dataset loader
+│   └── styling.py                   # Custom CSS / design system helpers
 ├── sample_data/
-│   ├── resumes/*.txt            # 8 sample candidates (derived from a public resume dataset)
-│   └── job_descriptions/*.txt   # 3 sample JDs (Machine Learning, Full Stack, DevOps)
-├── tests/test_auth.py           # Unit tests for accounts + per-account settings
-├── scripts/build_sample_data.py # One-off script that curated sample_data/ (not needed at runtime)
-├── .streamlit/config.toml       # Theme
-└── requirements.txt
+│   ├── resumes/                    # 8 sample candidate resumes (PDF, DOCX, TXT)
+│   └── job_descriptions/          # 3 sample JDs (Machine Learning Engineer, Full Stack, DevOps)
+├── supabase/
+│   └── resume_storage.sql          # Complete Supabase schema (tables, indexes, private storage bucket)
+├── scripts/
+│   ├── tenant_isolation_migration.sql # Multi-tenant isolation & Row Level Security (RLS) policies
+│   └── build_sample_data.py        # Dataset curation script
+└── tests/
+    ├── test_auth.py                # Unit tests for authentication & session tokens
+    ├── test_candidate_mgmt.py      # Candidate management & deduplication tests
+    ├── test_parser.py              # Parsing & portfolio link extraction tests
+    ├── test_parser_regression.py   # Full parser regression test suite
+    └── test_tenant_isolation.py    # Multi-tenant scoping & storage isolation tests
 ```
 
 ## 5. Running it locally
 
 ```bash
+# 1. Clone repository and set up virtual environment
+git clone https://github.com/anuvab2004/TalentIQ-Resume-Screener.git
+cd TalentIQ-Resume-Screener
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+
+# 2. Configure environment (Optional: enables Supabase cloud persistence; runs offline if omitted)
+cp .env.example .env
+
+# 3. Launch the Streamlit application
 streamlit run app.py
 ```
 
 Open the URL Streamlit prints (usually `http://localhost:8501`), choose
-**Create account**, and you're in.
+**Create account** (or **Sign in**), and you're in.
+
+**Run the automated test suite:**
+```bash
+python -m unittest discover -s tests -v
+```
 
 **Try it instantly, with no uploads:** open **Resume Upload**, leave
 "include the bundled sample candidates" checked, and click **Run AI
 Screening**. A ready-made *Machine Learning Engineer* requisition and 8 demo
-candidates are pre-loaded.
+candidates across PDF, DOCX, and TXT formats are pre-loaded.
 
 ## 6. Deploying it
 
+### Supabase Database & Storage Setup (Recommended)
+To enable multi-tenant cloud persistence for requisitions, candidates, and uploaded resume files:
+1. Create a free project at [supabase.com](https://supabase.com).
+2. Go to **SQL Editor** and run `supabase/resume_storage.sql` to initialize the database tables (`requisitions`, `candidates`, `interview_guides`, `email_logs`) and private `resumes` storage bucket.
+3. Run `scripts/tenant_isolation_migration.sql` to enable Row Level Security (RLS) and multi-tenant policies.
+4. Copy your **Project URL** and **Anon/Publishable Key** from Project Settings → API into your `.env` or hosting provider secrets.
+
 ### Streamlit Community Cloud (fastest)
-1. Push this folder to a GitHub repo.
+1. Push this repository to GitHub.
 2. Go to [share.streamlit.io](https://share.streamlit.io) → **New app**.
-3. Point it at your repo, branch, and `app.py`.
-4. Deploy — `requirements.txt` and `.streamlit/config.toml` are picked up
+3. Point it at your repo, branch (`main`), and `app.py`.
+4. In **Advanced Settings** → **Secrets**, add your Supabase credentials:
+   ```toml
+   SUPABASE_URL = "https://your-project.supabase.co"
+   SUPABASE_KEY = "your-anon-publishable-key"
+   ```
+5. Deploy — `requirements.txt` and `.streamlit/config.toml` are picked up
    automatically.
 
 ### Docker & Docker Compose (Recommended for Containerized Environments)
@@ -254,17 +287,20 @@ candidates are pre-loaded.
 Run TalentIQ with a single command using Docker Compose:
 
 ```bash
-# 1. Start the container with Docker Compose
+# 1. Configure environment
+cp .env.example .env
+
+# 2. Start the container with Docker Compose
 docker compose up -d --build
 
-# 2. View running logs
+# 3. View running logs
 docker compose logs -f
 
-# 3. Stop the container
+# 4. Stop the container
 docker compose down
 ```
 
-Open your browser at **http://localhost:8501**. User accounts and organization settings will automatically persist in the `talentiq-data` Docker volume.
+Open your browser at **http://localhost:8501**. User accounts, organization settings, and credentials will automatically persist in the `talentiq-data` Docker volume.
 
 #### Using standalone Docker CLI:
 
@@ -273,7 +309,7 @@ Open your browser at **http://localhost:8501**. User accounts and organization s
 docker build -t talentiq:latest .
 
 # Run container with volume persistence for user data
-docker run -d -p 8501:8501 -v talentiq-data:/app/data --name talentiq-app talentiq:latest
+docker run -d -p 8501:8501 --env-file .env -v talentiq-data:/app/data --name talentiq-app talentiq:latest
 ```
 
 #### Optional: Building with Sentence-Transformers Embeddings
@@ -301,26 +337,28 @@ streamlit run app.py --server.port $PORT --server.address 0.0.0.0
    use the sample candidates), and click **Run AI Screening**.
 3. **🧠 Candidate Intelligence** — review the ranked list, filter by match
    tier, search by name/skill, open any candidate's full explainable profile,
-   and Shortlist / Move to Review / Reject. Export the ranked shortlist as CSV.
+   view/download their original resume document, and Shortlist / Move to Review / Reject.
+   Export the ranked shortlist as CSV.
 4. **🏠 Dashboard** — track Active Jobs, Resumes Screened, Skills Identified,
    and Candidates Shortlisted, plus match-distribution, top-skill, experience,
    and skill-gap charts across every requisition you've run.
 5. **⚙️ Settings** — see the scoring weights, the fairness statement and
-   blind-scoring audit summary, set your Organization & Email Identity, and
+   blind-scoring audit summary, set your Organization & Email Identity,
    connect an SMTP account for candidate email automation (§2.3), and choose
-   the semantic matching engine (§3.1). Reset
-   session data here too.
+   the semantic matching engine (§3.1). Reset session data here too.
 
 From any candidate's profile (Candidate Intelligence → **View Profile**) you
 can also: mark **Shortlisted / Review / Rejected**, **Generate Interview
-Questions**, and send or download a **Selection / Interview / Rejection**
-email — see §2.1–2.3 for details.
+Questions**, view the candidate's verified social & coding profiles (LinkedIn,
+GitHub, LeetCode, HackerRank, Portfolio), download/preview their original resume file,
+and send or download a **Selection / Interview / Rejection** email — see §2.1–2.3 for details.
 
 ## 8. Sample data
 
-`sample_data/` ships 8 anonymized, synthetically-named candidates and 3 job
-descriptions so anyone can demo the full pipeline with zero setup. The
-underlying resume/JD text originates from a public Kaggle resume-category
+`sample_data/` ships 8 anonymized candidates across PDF, DOCX, and TXT formats
+and 3 job descriptions (Machine Learning Engineer, Full Stack Developer, DevOps
+Engineer) so anyone can demo the full multi-format parsing pipeline with zero setup.
+The underlying resume/JD text originates from a public Kaggle resume-category
 dataset and a public job-postings dataset; names, emails, and phone numbers
 were synthesized for the demo and are fictional.
 
@@ -334,10 +372,9 @@ were synthesized for the demo and are fictional.
 - Years-of-experience detection uses explicit phrases ("5+ years of
   experience") and date-range heuristics; a resume with neither will show
   "0 years" until reviewed manually.
-- Storage is session-scoped by design (no database) — ideal for a live demo;
-  swapping in SQLite/Postgres is a straightforward next step for persistent,
-  multi-recruiter use. Accounts and saved settings are the exception: they are
-  persisted on disk (§2.5), so they need a host with a persistent disk.
+- Cloud persistence is powered by Supabase PostgreSQL and private Storage with
+  Row Level Security; upcoming enhancements include direct webhook integrations
+  with external ATS platforms (e.g. Greenhouse, Lever, Workday).
 - The JD bias scanner and interview-question generator are rule-based/curated
   rather than model-generated, in the same dependency-light spirit as the
   default TF-IDF matching engine; an LLM-backed rewrite is a natural upgrade
