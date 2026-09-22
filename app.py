@@ -1239,7 +1239,7 @@ def candidate_profile_dialog(rid, result):
     # ----------------------------------------------------------------------
     # Option to view submitted resume vs parsed resume
     # ----------------------------------------------------------------------
-    with st.expander("📑 View Submitted Resume (Original vs. Parsed)", expanded=False):
+    with st.expander("📑 View Submitted Resume (Original vs. Parsed)", expanded=True):
         sub_fname, sub_bytes = _get_submitted_resume_bytes(result, rid)
         sub_ext = sub_fname.split(".")[-1].lower() if sub_fname and "." in sub_fname else "txt"
         sub_mime = "application/pdf" if sub_ext == "pdf" else (
