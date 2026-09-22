@@ -1,0 +1,26 @@
+BRETT LEE
+Seattle, WA | jordan.lee@email.com | (555) 111-2222
+
+Summary
+Data Analyst with 4 years of experience in SQL, Python, and Tableau.
+
+Skills
+SQL, Python, Pandas, Tableau, A/B Testing, Statistics
+
+Experience
+
+Data Analyst | Northwind Retail | Seattle, WA
+January 2020 - Present
+- Built SQL queries to analyze customer data.
+- Created Tableau dashboards for marketing KPIs.
+- Ran A/B tests to optimize landing pages.
+
+Junior Analyst | BlueSky Media | Seattle, WA
+June 2018 - December 2019
+- Cleaned data using Python and Pandas.
+- Supported senior analysts with reporting.
+
+Education
+Bachelor of Science in Economics
+University of Washington
+May 2018
