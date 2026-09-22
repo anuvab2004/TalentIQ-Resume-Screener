@@ -380,9 +380,9 @@ were synthesized for the demo and are fictional.
   Row Level Security; upcoming enhancements include direct webhook integrations
   with external ATS platforms (e.g. Greenhouse, Lever, Workday).
 - The JD bias scanner and interview-question generator are rule-based/curated
-  rather than model-generated, in the same dependency-light spirit as the
-  default TF-IDF matching engine; an LLM-backed rewrite is a natural upgrade
-  path for both, similar to the optional embeddings engine in §3.1.
+  rather than model-generated; while the matching engine defaults to MiniLM
+  embeddings (`all-MiniLM-L6-v2`), an LLM-backed rewrite/generation engine is
+  a natural upgrade path for both the bias scanner and interview question generator.
 - Email sending requires the recruiter's own SMTP credentials (no email
   provider is bundled); without them, emails can still be drafted and
   downloaded as `.eml` files.

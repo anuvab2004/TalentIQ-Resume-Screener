@@ -10,14 +10,12 @@ Weighting mirrors the AI Pipeline's published rubric:
     Education Evidence    5%
 
 Semantic Relevance has two backends:
-  - "tfidf"      — TF-IDF cosine similarity. Zero extra dependencies, instant,
-                    the default. Rewards close-but-not-identical phrasing at
-                    the word level.
-  - "embeddings" — sentence-transformer sentence embeddings (cosine
-                    similarity in meaning-space, not just wording). Optional:
-                    only used if the `sentence-transformers` package is
-                    installed (see requirements-embeddings.txt) — otherwise
-                    every call transparently falls back to TF-IDF.
+  - "auto" / "embeddings" — sentence-transformer embeddings (all-MiniLM-L6-v2)
+                            in meaning-space. The default engine when
+                            sentence-transformers is installed.
+  - "tfidf"               — TF-IDF cosine similarity. Used as a fast, zero-dependency
+                            automated fallback if sentence-transformers is missing,
+                            or selectable for lightweight offline runs.
 """
 import hashlib
 from dataclasses import dataclass, field
