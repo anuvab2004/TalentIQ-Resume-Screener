@@ -1106,12 +1106,16 @@ def candidate_profile_dialog(rid, result):
     with c2:
         st.markdown(f"### {result.candidate_name}")
         st.caption(f"{result.email}  ·  {result.phone}")
+        is_leet = "leetcode.com" in (result.portfolio_url or "").lower()
         social_fields = (
             ("LinkedIn", "linkedin_url"),
             ("GitHub", "github_url"),
-            ("Portfolio", "portfolio_url"),
+            ("LeetCode" if is_leet else "Portfolio", "portfolio_url"),
         )
-        social_labels = extract_social_link_labels(getattr(result, "raw_text", ""))
+        raw_txt = getattr(result, "raw_text", "") or _resolve_candidate_raw_text(result, rid)
+        social_labels = extract_social_link_labels(raw_txt)
+        if is_leet:
+            social_labels["portfolio_url"] = "LeetCode"
         social_lines = [
             f"**{social_labels.get(field, label)}:** [{_social_url(result, field)}]({_social_url(result, field)})"
             for label, field in social_fields
@@ -1233,8 +1237,8 @@ def candidate_profile_dialog(rid, result):
             st.caption("No gaps against the role's detected required skills.")
 
     if result.extra_skills:
-        st.markdown("**➕ Additional Skills on Resume**")
-        st.markdown("".join(f'<span class="tiq-skill-chip chip-extra">{s}</span>' for s in result.extra_skills[:20]), unsafe_allow_html=True)
+        st.markdown(f"**➕ Additional Skills on Resume ({len(result.extra_skills)})**")
+        st.markdown("".join(f'<span class="tiq-skill-chip chip-extra">{s}</span>' for s in result.extra_skills), unsafe_allow_html=True)
 
     # ----------------------------------------------------------------------
     # Option to view submitted resume vs parsed resume
@@ -1299,7 +1303,10 @@ def candidate_profile_dialog(rid, result):
                 if result.github_url and result.github_url != "Not detected":
                     parsed_card.append(f'<div><span style="font-weight:700;color:#1e293b;">🐙 GitHub:</span> &nbsp;<a href="{html.escape(result.github_url)}" target="_blank">{html.escape(result.github_url)}</a></div>')
                 if result.portfolio_url and result.portfolio_url != "Not detected":
-                    parsed_card.append(f'<div><span style="font-weight:700;color:#1e293b;">🌐 Portfolio:</span> &nbsp;<a href="{html.escape(result.portfolio_url)}" target="_blank">{html.escape(result.portfolio_url)}</a></div>')
+                    p_is_leet = "leetcode.com" in result.portfolio_url.lower()
+                    p_icon = "💻" if p_is_leet else "🌐"
+                    p_name = "LeetCode" if p_is_leet else "Portfolio"
+                    parsed_card.append(f'<div><span style="font-weight:700;color:#1e293b;">{p_icon} {p_name}:</span> &nbsp;<a href="{html.escape(result.portfolio_url)}" target="_blank">{html.escape(result.portfolio_url)}</a></div>')
 
                 st.markdown(
                     '<div style="background:rgba(248,250,252,0.8);border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-bottom:12px;font-size:0.88rem;line-height:1.7;">'
@@ -1321,7 +1328,7 @@ def candidate_profile_dialog(rid, result):
                 all_skills_chips = []
                 for s in result.matched_skills:
                     all_skills_chips.append(f'<span class="tiq-skill-chip chip-match" title="Matched requirement">{s}</span>')
-                for s in result.extra_skills[:15]:
+                for s in result.extra_skills:
                     all_skills_chips.append(f'<span class="tiq-skill-chip chip-extra" title="Additional detected skill">{s}</span>')
                 st.markdown("".join(all_skills_chips), unsafe_allow_html=True)
 
@@ -1451,7 +1458,7 @@ def build_profile_text(result):
         f"Phone: {result.phone}",
         f"LinkedIn: {_social_url(result, 'linkedin_url')}",
         f"GitHub: {_social_url(result, 'github_url')}",
-        f"Portfolio: {_social_url(result, 'portfolio_url')}",
+        f"{'LeetCode' if 'leetcode.com' in (_social_url(result, 'portfolio_url') or '').lower() else 'Portfolio'}: {_social_url(result, 'portfolio_url')}",
         f"Education: {result.education}",
         f"Experience: {format_experience(result.years_experience, getattr(result, 'experience_months', None))}",
         f"",
@@ -1665,7 +1672,7 @@ def page_candidates():
         "Phone": r.phone,
         "LinkedIn": _social_url(r, "linkedin_url"),
         "GitHub": _social_url(r, "github_url"),
-        "Portfolio": _social_url(r, "portfolio_url"),
+        ("LeetCode" if "leetcode.com" in (_social_url(r, "portfolio_url") or "").lower() else "Portfolio"): _social_url(r, "portfolio_url"),
         "Score": r.overall_score,
         "Status": r.status,
         "Semantic Relevance": r.factors.get("semantic_relevance", 0) if isinstance(r.factors, dict) else 0,
