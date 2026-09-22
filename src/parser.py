@@ -245,10 +245,28 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
             except TypeError:
                 t = page.extract_text() or ""
             # Some PDFs store the destination separately from the visible link text.
-            for hyperlink in getattr(page, "hyperlinks", []):
-                uri = hyperlink.get("uri")
-                if uri:
-                    t += f"\n{uri}"
+            hyperlinks = getattr(page, "hyperlinks", [])
+            if hyperlinks:
+                try:
+                    words = sorted(page.extract_words(), key=lambda w: (w["top"], w["x0"]))
+                except Exception:
+                    words = []
+                for hyperlink in hyperlinks:
+                    uri = hyperlink.get("uri")
+                    if not uri:
+                        continue
+                    h_top = hyperlink.get("top", 0)
+                    h_x0 = hyperlink.get("x0", 0)
+                    line_words = [w["text"] for w in words if abs(w["top"] - h_top) < 8 and w["x0"] < h_x0 + 5]
+                    pre = " ".join(line_words).strip()
+                    if re.search(r"\b(leetcode|github|linkedin|portfolio|website|site)\b", pre, re.IGNORECASE):
+                        m_lbl = re.search(r"([A-Za-z]+)\s*:?$", pre)
+                        lbl = m_lbl.group(1).title() if m_lbl else ""
+                        t += f"\n{lbl}: {uri}" if lbl else f"\n{uri}"
+                    elif h_top > 220 or any(p in pre.lower() for p in ("project", "detector", "app", "demo", "speed")):
+                        t += f"\nProject Link: {uri}"
+                    else:
+                        t += f"\n{uri}"
             text_chunks.append(t)
     return "\n".join(text_chunks)
 
@@ -754,28 +772,111 @@ def extract_education(text: str, mode: str = "highest") -> str:
     return "Not detected"
 
 
-def extract_social_links(text: str) -> dict:
-    """Extract the main professional links from resume text."""
-    links = []
-    for match in URL_RE.finditer(text):
-        link = match.group(0).rstrip(".,;:)]}")
-        if not link.lower().startswith(("http://", "https://")):
-            link = "https://" + link
-        if link not in links:
-            links.append(link)
+_PROJECT_DOMAINS = (
+    ".streamlit.app", ".vercel.app", ".netlify.app", ".onrender.com",
+    ".herokuapp.com", ".firebaseapp.com", ".web.app", ".railway.app",
+    ".pages.dev", ".fly.dev",
+)
+_CERT_DOMAINS = (
+    "/verify/", "/certificate/", "/certificates/", "credly.com",
+    "coursera.org", "udemy.com", "greatlearning.in",
+)
 
+
+def _is_github_repo(url: str) -> bool:
+    """True if url is a GitHub repository (e.g. github.com/user/repo),
+    not a user profile (github.com/user)."""
+    m = re.search(r"github\.com/([a-zA-Z0-9_-]+)/([a-zA-Z0-9_.-]+)", url, re.IGNORECASE)
+    if m:
+        user = m.group(1).lower()
+        repo = m.group(2).lower()
+        if user not in ("trending", "explore", "topics", "pricing", "features", "enterprise", "settings") and repo:
+            return True
+    return False
+
+
+def _is_project_or_cert_url(url: str, prefix: str = "", section: str = "") -> bool:
+    low = url.lower()
+    if _is_github_repo(low):
+        return True
+    if any(c in low for c in _CERT_DOMAINS):
+        return True
+    if section in ("projects", "certifications", "experience"):
+        if not re.search(r"\b(portfolio|personal\s+website|website)\b", prefix.lower()):
+            return True
+    if any(d in low for d in _PROJECT_DOMAINS):
+        if not re.search(r"\b(portfolio|personal\s+website|website|site)\b", prefix.lower()):
+            return True
+    if re.search(
+        r"\b(project|demo|live\s+demo|live\s+link|app\s+link|repo|repository|source\s+code|preview|deployed)\b",
+        prefix.lower(),
+    ):
+        return True
+    return False
+
+
+def extract_social_links(text: str) -> dict:
+    """Extract the main professional links (LinkedIn, GitHub, Portfolio/LeetCode)
+    from resume text, ensuring project links, repositories, and certs are NEVER
+    mistaken for a candidate's portfolio."""
     social = {"linkedin_url": "Not detected", "github_url": "Not detected", "portfolio_url": "Not detected"}
-    remaining = []
-    for link in links:
+
+    links_with_ctx = []
+    curr_sec = "preamble"
+
+    for line in text.splitlines():
+        l_str = line.strip().lower()
+        if any(l_str.startswith(h) for h in ("project", "personal project", "key project", "academic project", "selected project")):
+            curr_sec = "projects"
+        elif any(l_str.startswith(h) for h in ("education", "academic qualification", "academic background")):
+            curr_sec = "education"
+        elif any(l_str.startswith(h) for h in ("experience", "work history", "employment", "internship")):
+            curr_sec = "experience"
+        elif any(l_str.startswith(h) for h in ("certification", "certificate", "achievements")):
+            curr_sec = "certifications"
+        elif any(l_str.startswith(h) for h in ("skill", "technical skill", "core skill")):
+            curr_sec = "skills"
+
+        for match in URL_RE.finditer(line):
+            link = match.group(0).rstrip(".,;:)]}")
+            if not link.lower().startswith(("http://", "https://")):
+                link = "https://" + link
+            prefix = line[:match.start()].strip()
+            links_with_ctx.append((link, prefix, curr_sec))
+
+    portfolio_candidates = []
+    for link, prefix, sec in links_with_ctx:
         lower = link.lower()
+
+        # 1. LinkedIn
         if "linkedin.com" in lower and social["linkedin_url"] == "Not detected":
             social["linkedin_url"] = link
-        elif "github.com" in lower and social["github_url"] == "Not detected":
-            social["github_url"] = link
-        else:
-            remaining.append(link)
-    if remaining:
-        social["portfolio_url"] = remaining[0]
+            continue
+
+        # 2. GitHub Profile (reject project repos)
+        if "github.com" in lower:
+            if not _is_github_repo(lower) and social["github_url"] == "Not detected":
+                social["github_url"] = link
+                continue
+            # Project repo link - do NOT use as portfolio!
+            continue
+
+        # 3. Filter out project demos, repo links, and certs
+        if _is_project_or_cert_url(link, prefix=prefix, section=sec):
+            continue
+
+        # 4. Check if valid portfolio / coding profile candidate
+        is_explicit = bool(re.search(r"\b(portfolio|personal\s+website|website|web|site|homepage)\b", prefix.lower()))
+        is_code = any(cp in lower for cp in ("leetcode.com", "hackerrank.com", "codechef.com", "codeforces.com"))
+        is_preamble = (sec == "preamble")
+
+        if is_explicit or is_code or is_preamble:
+            portfolio_candidates.append((link, is_explicit, is_code, is_preamble))
+
+    if portfolio_candidates:
+        portfolio_candidates.sort(key=lambda item: (not item[1], not item[2], not item[3]))
+        social["portfolio_url"] = portfolio_candidates[0][0]
+
     return social
 
 
@@ -787,7 +888,7 @@ def extract_social_link_labels(text: str) -> dict:
         "portfolio_url": "Portfolio",
     }
     label_re = re.compile(
-        r"(linkedin|github|leetcode|portfolio|personal\s+website|website|web|site)\s*(?:and\s+links)?\s*:?\s*$",
+        r"(linkedin|github|leetcode|hackerrank|codechef|codeforces|portfolio|personal\s+website|website|web|site)\s*(?:and\s+links)?\s*:?\s*$",
         re.IGNORECASE,
     )
     for match in URL_RE.finditer(text):
@@ -796,7 +897,7 @@ def extract_social_link_labels(text: str) -> dict:
         lower = normalized.lower()
         if "linkedin.com" in lower:
             field = "linkedin_url"
-        elif "github.com" in lower:
+        elif "github.com" in lower and not _is_github_repo(lower):
             field = "github_url"
         else:
             field = "portfolio_url"
@@ -805,12 +906,15 @@ def extract_social_link_labels(text: str) -> dict:
         label_match = label_re.search(prefix)
         if "leetcode.com" in lower:
             labels["portfolio_url"] = "LeetCode"
+        elif "hackerrank.com" in lower:
+            labels["portfolio_url"] = "HackerRank"
         elif label_match:
             label = label_match.group(1).strip().lower()
             labels[field] = {
                 "linkedin": "LinkedIn",
                 "github": "GitHub",
                 "leetcode": "LeetCode",
+                "hackerrank": "HackerRank",
                 "portfolio": "Portfolio",
                 "personal website": "Personal Website",
                 "website": "Website",

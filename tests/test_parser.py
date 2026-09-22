@@ -357,6 +357,47 @@ Product & Web Developer Intern - Baha (studiobaha.com)
         self.assertIn("Express.js", skills_explicit)
 
 
+    def test_project_links_not_added_to_portfolio(self):
+        from src.parser import extract_social_links, parse_document
+
+        # Case 1: Candidate with project repository and LeetCode in header
+        text_with_repo = """
+        MOYUKH DAS
+        LeetCode: https://leetcode.com/u/moyukhd11
+        GitHub: https://github.com/moyukhd11
+        LinkedIn: https://linkedin.com/in/moyukhd11
+        PROJECTS
+        Typing Speed Detector
+        Project Link: https://github.com/moyukhd11/Typing-Speed-Detector
+        """
+        social = extract_social_links(text_with_repo)
+        self.assertEqual(social["github_url"], "https://github.com/moyukhd11")
+        self.assertEqual(social["linkedin_url"], "https://linkedin.com/in/moyukhd11")
+        self.assertEqual(social["portfolio_url"], "https://leetcode.com/u/moyukhd11")
+
+        # Case 2: Candidate with only project demo (Streamlit/Vercel) under Projects
+        text_with_demo = """
+        RITAM JASH
+        Kolkata | +91 8537002003 | jashritam@gmail.com
+        EDUCATION
+        B.Tech
+        PROJECTS
+        PharmaSense Assistant: https://pharmasensee.streamlit.app/
+        """
+        social2 = extract_social_links(text_with_demo)
+        self.assertEqual(social2["portfolio_url"], "Not detected")
+
+        # Case 3: Candidate with personal website in header vs project demo in projects
+        text_with_both = """
+        ALEX MORGAN
+        alex@email.com | https://alexmorgan.dev
+        PROJECTS
+        Weather App: https://weather-app.vercel.app
+        """
+        social3 = extract_social_links(text_with_both)
+        self.assertEqual(social3["portfolio_url"], "https://alexmorgan.dev")
+
+
 if __name__ == "__main__":
     unittest.main()
 

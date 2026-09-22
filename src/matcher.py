@@ -90,7 +90,7 @@ def embeddings_available() -> bool:
     global _EMBEDDINGS_AVAILABLE
     if _EMBEDDINGS_AVAILABLE is None:
         try:
-            import sentence_transformers  # noqa: F401
+            import sentence_transformers  # noqa: F401  # type: ignore
             _EMBEDDINGS_AVAILABLE = True
         except ImportError:
             _EMBEDDINGS_AVAILABLE = False
@@ -101,7 +101,7 @@ def _get_embedding_model():
     global _EMBEDDING_MODEL
 
     if _EMBEDDING_MODEL is None:
-        from sentence_transformers import SentenceTransformer
+        from sentence_transformers import SentenceTransformer  # type: ignore
 
         _EMBEDDING_MODEL = SentenceTransformer(
             EMBEDDING_MODEL_NAME
@@ -115,6 +115,8 @@ def preload_embedding_model():
     Load the embedding model once when the application starts.
     Later screening calls reuse the same model from memory.
     """
+    if not embeddings_available():
+        return None
     return _get_embedding_model()
 
 
