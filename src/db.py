@@ -246,7 +246,8 @@ def fetch_results(req_id: str, user_id: Optional[str] = None) -> list:
                 try:
                     from .sample_data import list_sample_resumes, load_sample_resume_bytes
                     if fname in list_sample_resumes():
-                        raw_text = load_sample_resume_bytes(fname).decode("utf-8", errors="replace")
+                        from .parser import extract_text
+                        raw_text = extract_text(fname, load_sample_resume_bytes(fname))
                 except Exception:
                     pass
 

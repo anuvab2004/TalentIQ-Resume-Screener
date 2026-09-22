@@ -5,10 +5,16 @@ RESUME_DIR = os.path.join(BASE, "resumes")
 JD_DIR = os.path.join(BASE, "job_descriptions")
 
 
+SUPPORTED_RESUME_EXTENSIONS = (".txt", ".pdf", ".docx")
+
+
 def list_sample_resumes():
     if not os.path.isdir(RESUME_DIR):
         return []
-    return sorted(f for f in os.listdir(RESUME_DIR) if f.endswith(".txt"))
+    return sorted(
+        f for f in os.listdir(RESUME_DIR)
+        if f.lower().endswith(SUPPORTED_RESUME_EXTENSIONS)
+    )
 
 
 def load_sample_resume_bytes(filename):

@@ -24,7 +24,17 @@ from src.matcher import (
     embeddings_available,
     WEIGHTS,
 )
-from src.parser import extract_experience_months, extract_social_link_labels, extract_social_links, extract_work_periods, format_experience, format_years, parse_document, parse_job_description
+from src.parser import (
+    extract_experience_months,
+    extract_social_link_labels,
+    extract_social_links,
+    extract_text,
+    extract_work_periods,
+    format_experience,
+    format_years,
+    parse_document,
+    parse_job_description,
+)
 try:
     from src.parser import clean_doubled_text
 except (ImportError, AttributeError):
@@ -639,7 +649,14 @@ def page_upload():
         label_visibility="collapsed",
     )
 
-    use_sample = st.checkbox("Also include the bundled sample candidates (8 demo resumes)", value=(len(uploaded_files or []) == 0))
+    sample_resumes = list_sample_resumes()
+    sample_count = len(sample_resumes)
+    sample_label = (
+        f"Also include the bundled sample candidates ({sample_count} demo resume{'s' if sample_count != 1 else ''})"
+        if sample_count > 0
+        else "Also include the bundled sample candidates"
+    )
+    use_sample = st.checkbox(sample_label, value=(len(uploaded_files or []) == 0))
 
     existing_results = st.session_state["results"].get(rid, [])
     upload_mode = "Append to existing pool"
@@ -666,7 +683,7 @@ def page_upload():
         for f in uploaded_files:
             file_records.append((f.name, f.getvalue(), f"{len(f.getvalue())/1024:.0f} KB"))
     if use_sample:
-        for name in list_sample_resumes():
+        for name in sample_resumes:
             data = load_sample_resume_bytes(name)
             file_records.append((name, data, f"{len(data)/1024:.0f} KB"))
 
@@ -1013,23 +1030,28 @@ def _get_submitted_resume_bytes(result, rid):
     # 2. Match directly by filename in sample resumes
     if fname:
         try:
-            if fname in list_sample_resumes():
+            sample_list = list_sample_resumes()
+            if fname in sample_list:
                 return fname, load_sample_resume_bytes(fname)
-            cand_txt = fname if fname.endswith(".txt") else f"{fname}.txt"
-            if cand_txt in list_sample_resumes():
-                return cand_txt, load_sample_resume_bytes(cand_txt)
+            fname_stem = os.path.splitext(fname)[0].lower().strip()
+            for sf in sample_list:
+                if os.path.splitext(sf)[0].lower().strip() == fname_stem:
+                    return sf, load_sample_resume_bytes(sf)
         except Exception:
             pass
 
     # 3. Match candidate name slug in sample resumes
     cand_name = getattr(result, "candidate_name", "")
     if cand_name:
-        cand_slug = re.sub(r"[^a-zA-Z0-9_]", "_", cand_name.lower().strip()) + ".txt"
-        if cand_slug in list_sample_resumes():
-            try:
-                return cand_slug, load_sample_resume_bytes(cand_slug)
-            except Exception:
-                pass
+        try:
+            sample_list = list_sample_resumes()
+            norm_name = re.sub(r"[^a-zA-Z0-9]", "", cand_name.lower())
+            for sf in sample_list:
+                sf_norm = re.sub(r"[^a-zA-Z0-9]", "", os.path.splitext(sf)[0].lower())
+                if norm_name and (norm_name == sf_norm or norm_name in sf_norm or sf_norm in norm_name):
+                    return sf, load_sample_resume_bytes(sf)
+        except Exception:
+            pass
 
     # 4. Download from Supabase Storage
     if fname:
@@ -1060,7 +1082,7 @@ def _resolve_candidate_raw_text(result, rid):
         if fname in list_sample_resumes():
             b = load_sample_resume_bytes(fname)
             if b:
-                return b.decode("utf-8", errors="replace")
+                return extract_text(fname, b)
     except Exception:
         pass
     try:
