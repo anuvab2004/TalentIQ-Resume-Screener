@@ -820,6 +820,28 @@ def extract_social_link_labels(text: str) -> dict:
     return labels
 
 
+_JS_FRAMEWORK_PREFIXES = (
+    "node", "express", "react", "vue", "next", "nuxt",
+    "three", "chart", "d3", "angular", "ember", "backbone",
+    "electron", "meteor", "knockout", "alpine", "nest", "remix", "gatsby", "svelte",
+)
+
+
+def _is_standalone_js(text_low: str) -> bool:
+    """True only if 'js' appears as a standalone skill token (e.g. 'Languages: JS, Python'),
+    not as a file extension/suffix ('.js', 'node.js', 'express.js') and not as part of
+    a framework name like 'node js', 'express js', 'react js'."""
+    for m in re.finditer(r"(?<![a-z0-9./\-])js(?![a-z0-9])", text_low):
+        prefix = text_low[:m.start()].rstrip()
+        if any(
+            prefix.endswith(f) and (len(prefix) == len(f) or not prefix[-len(f)-1].isalnum())
+            for f in _JS_FRAMEWORK_PREFIXES
+        ):
+            continue
+        return True
+    return False
+
+
 def extract_skills(text: str, extra_skills: list = None) -> list:
     """extra_skills lets callers extend the built-in taxonomy at runtime
     (e.g. org-specific tools like LangGraph or vLLM added via Settings)
@@ -828,12 +850,33 @@ def extract_skills(text: str, extra_skills: list = None) -> list:
     found = set()
 
     for skill in MASTER_SKILLS:
-        pattern = r"(?<![a-z0-9])" + re.escape(skill.lower()) + r"(?![a-z0-9])"
+        s_low = skill.lower()
+        # Skills starting with a dot (e.g. '.NET') allow non-alphanumeric lookbehind;
+        # other skills must not be preceded by a dot to prevent matching file extensions/suffixes.
+        lb = r"(?<![a-z0-9])" if s_low.startswith(".") else r"(?<![a-z0-9.])"
+
+        # Skills ending with '+' or '#' (e.g. 'C++', 'C#') allow non-alphanumeric lookahead;
+        # 'C' alone must not be followed by '+' or '#' so 'C++' or 'C#' doesn't match 'C'.
+        if s_low.endswith("+") or s_low.endswith("#"):
+            la = r"(?![a-z0-9])"
+        elif s_low == "c":
+            la = r"(?![a-z0-9+#])"
+        else:
+            la = r"(?![a-z0-9])"
+
+        pattern = lb + re.escape(s_low) + la
         if re.search(pattern, low):
             found.add(skill)
 
     for alias, canonical in SYNONYMS.items():
-        pattern = r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])"
+        if alias == "js":
+            # 'js' is only JavaScript if standalone; never when part of '.js' or framework names
+            if _is_standalone_js(low):
+                found.add("JavaScript")
+            continue
+        lb = r"(?<![a-z0-9])" if alias.startswith(".") else r"(?<![a-z0-9.])"
+        la = r"(?![a-z0-9])"
+        pattern = lb + re.escape(alias) + la
         if re.search(pattern, low):
             found.add(canonical)
 
@@ -841,7 +884,10 @@ def extract_skills(text: str, extra_skills: list = None) -> list:
         skill = skill.strip()
         if not skill:
             continue
-        pattern = r"(?<![a-z0-9])" + re.escape(skill.lower()) + r"(?![a-z0-9])"
+        s_low = skill.lower()
+        lb = r"(?<![a-z0-9])" if s_low.startswith(".") else r"(?<![a-z0-9.])"
+        la = r"(?![a-z0-9])"
+        pattern = lb + re.escape(s_low) + la
         if re.search(pattern, low):
             found.add(skill)
 

@@ -326,6 +326,37 @@ Product & Web Developer Intern - Baha (studiobaha.com)
         self.assertEqual(extract_years_experience(text, now=NOW), 5.0)
 
 
+    def test_js_not_extracted_from_frameworks_or_dot_js(self):
+        from src.parser import extract_skills
+        # Case 1: Frameworks with .js or space variants must not extract JavaScript
+        resume_text = (
+            "Technical Skills: Java, SQL, HTML, CSS\n"
+            "Projects: Developed a Typing Speed Detector using React.js, Node.js, Express.js, and MongoDB"
+        )
+        skills = extract_skills(resume_text)
+        self.assertNotIn("JavaScript", skills)
+        self.assertIn("Node.js", skills)
+        self.assertIn("Express.js", skills)
+        self.assertIn("React", skills)
+        self.assertIn("Java", skills)
+
+        # Case 2: Node js / Express js space variants
+        skills_spaces = extract_skills("Backend built with Node js and Express js")
+        self.assertNotIn("JavaScript", skills_spaces)
+        self.assertIn("Node.js", skills_spaces)
+        self.assertIn("Express.js", skills_spaces)
+
+        # Case 3: Standalone JS should still resolve to JavaScript
+        skills_standalone = extract_skills("Skills: HTML, CSS, JS, Python")
+        self.assertIn("JavaScript", skills_standalone)
+
+        # Case 4: Explicit JavaScript keyword
+        skills_explicit = extract_skills("Skills: JavaScript, Node.js, Express.js")
+        self.assertIn("JavaScript", skills_explicit)
+        self.assertIn("Node.js", skills_explicit)
+        self.assertIn("Express.js", skills_explicit)
+
+
 if __name__ == "__main__":
     unittest.main()
 
