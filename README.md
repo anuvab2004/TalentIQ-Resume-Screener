@@ -152,7 +152,7 @@ signals, using the same weighting shown in the product's AI Pipeline panel:
 
 | Factor | Weight | What it measures |
 |---|---|---|
-| Semantic Relevance | 50% | Similarity between the full resume and the JD text — TF-IDF cosine similarity by default, or meaning-based sentence-transformer embeddings if enabled (§3.1) — rescaled across the current applicant pool so scores reflect *relative* fit for this role |
+| Semantic Relevance | 50% | Meaning-based similarity between the full resume and the JD text — powered by `all-MiniLM-L6-v2` sentence embeddings by default in `auto` mode (with transparent fallback to TF-IDF if dependencies are unavailable; §3.1) — rescaled across the current applicant pool so scores reflect *relative* fit for this role |
 | Skill Alignment | 30% | Share of the JD's required skills found on the resume, using a synonym-aware skill taxonomy (`ML` → `Machine Learning`, `JS` → `JavaScript`, etc.) |
 | Experience Evidence | 15% | Candidate's detected years of experience vs. the role's minimum |
 | Education Evidence | 5% | Candidate's detected education level vs. the role's requirement |
@@ -169,14 +169,18 @@ verifies that claim on every single candidate, not just in the abstract.
 
 ### 3.1 Semantic matching engine
 
-Semantic Relevance runs on TF-IDF cosine similarity by default — zero extra
-install, instant. An optional sentence-transformer embeddings engine
-(`all-MiniLM-L6-v2`) is available for meaning-based matching (catches
-phrasing TF-IDF misses, e.g. "led a squad" vs. "managed a team"): install
-`requirements.txt` and pick it in ⚙️ Settings → Semantic Matching
-Engine. If the package isn't installed, every mode transparently falls back
-to TF-IDF — nothing breaks. Each candidate's profile shows which engine
-actually produced their score.
+The semantic engine defaults to **`auto` mode**, which prioritizes meaning-based
+sentence embeddings using **`all-MiniLM-L6-v2`** (catches nuanced phrasing that
+keyword matching misses, e.g. "led a squad" vs. "managed a team"). 
+
+- **MiniLM Embeddings (`all-MiniLM-L6-v2`)**: Included in `requirements.txt` and
+  active by default whenever `sentence-transformers` is installed.
+- **Graceful Fallback**: If running in an environment without `sentence-transformers`,
+  the engine automatically and seamlessly falls back to TF-IDF cosine similarity —
+  zero crashes or interruption.
+- **Settings Toggle**: Recruiters can explicitly lock the engine to *Auto*, *TF-IDF
+  only*, or *Embeddings only* under ⚙️ Settings → Semantic Matching Engine. Each
+  candidate's profile displays the exact engine that generated their score.
 
 ## 4. Architecture
 
